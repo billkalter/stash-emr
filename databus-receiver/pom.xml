@@ -1,0 +1,135 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project xmlns="http://maven.apache.org/POM/4.0.0"
+         xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+         xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+
+    <modelVersion>4.0.0</modelVersion>
+
+    <parent>
+        <groupId>com.bazaarvoice.emodb.stash-emr</groupId>
+        <artifactId>parent</artifactId>
+        <version>0.1-SNAPSHOT</version>
+        <relativePath>../parent/pom.xml</relativePath>
+    </parent>
+
+    <artifactId>databus-receiver</artifactId>
+    <version>0.1-SNAPSHOT</version>
+
+    <properties>
+        <emodb.version>5.6.3</emodb.version>
+        <ostrich.version>1.9.2</ostrich.version>
+        <jodatime.version>2.8.2</jodatime.version>
+    </properties>
+    
+    <dependencies>
+        <dependency>
+            <groupId>com.bazaarvoice.emodb.stash-emr</groupId>
+            <artifactId>common</artifactId>
+            <version>${project.version}</version>
+            <scope>provided</scope>
+        </dependency>
+        <dependency>
+            <groupId>com.bazaarvoice.emodb</groupId>
+            <artifactId>emodb-databus-client</artifactId>
+            <version>${emodb.version}</version>
+        </dependency>
+        <dependency>
+            <groupId>com.bazaarvoice.ostrich.zookeeper</groupId>
+            <artifactId>ostrich-zookeeper-discovery</artifactId>
+            <version>${ostrich.version}</version>
+        </dependency>
+
+        <dependency>
+            <groupId>org.apache.spark</groupId>
+            <artifactId>spark-streaming_2.11</artifactId>
+            <scope>provided</scope>
+        </dependency>
+    </dependencies>
+
+    <build>
+        <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-shade-plugin</artifactId>
+                <configuration>
+                    <createDependencyReducedPom>true</createDependencyReducedPom>
+                    <filters>
+                        <filter>
+                            <artifact>*:*</artifact>
+                            <excludes>
+                                <exclude>META-INF/*.SF</exclude>
+                                <exclude>META-INF/*.DSA</exclude>
+                                <exclude>META-INF/*.RSA</exclude>
+                            </excludes>
+                        </filter>
+                    </filters>
+                    
+                    <relocations>
+                        <relocation>
+                            <pattern>com.codahale</pattern>
+                            <shadedPattern>databusstreaming.repackaged.com.codahale</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>com.fasterxml</pattern>
+                            <shadedPattern>databusstreaming.repackaged.com.fasterxml</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>com.google</pattern>
+                            <shadedPattern>databusstreaming.repackaged.com.google</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>com.sun</pattern>
+                            <shadedPattern>databusstreaming.repackaged.com.sun</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>io.dropwizard</pattern>
+                            <shadedPattern>databusstreaming.repackaged.org.apache</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>org.apache</pattern>
+                            <shadedPattern>databusstreaming.repackaged.org.apache</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>org.eclipse</pattern>
+                            <shadedPattern>databusstreaming.repackaged.org.eclipse</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>org.jboss</pattern>
+                            <shadedPattern>databusstreaming.repackaged.org.jboss</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>javax.validation</pattern>
+                            <shadedPattern>databusstreaming.repackaged.javax.validation</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>javax.annotation</pattern>
+                            <shadedPattern>databusstreaming.repackaged.javax.annotation</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>javax.servlet</pattern>
+                            <shadedPattern>databusstreaming.repackaged.javax.servlet</shadedPattern>
+                        </relocation>
+                        <relocation>
+                            <pattern>javax.ws</pattern>
+                            <shadedPattern>databusstreaming.repackaged.javax.ws</shadedPattern>
+                        </relocation>
+                    </relocations>
+                </configuration>
+                <executions>
+                    <execution>
+                        <phase>package</phase>
+                        <goals>
+                            <goal>shade</goal>
+                        </goals>
+                        <configuration>
+                            <createDependencyReducedPom>false</createDependencyReducedPom>
+                            <transformers>
+                                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer" />
+                            </transformers>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
+        </plugins>
+    </build>
+</project>
