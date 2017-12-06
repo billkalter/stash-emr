@@ -7,6 +7,7 @@ import com.bazaarvoice.emodb.databus.api.PollResult;
 import com.bazaarvoice.emodb.databus.client.DatabusClientFactory;
 import com.bazaarvoice.emodb.databus.client.DatabusFixedHostDiscoverySource;
 import com.bazaarvoice.emodb.sor.api.Intrinsic;
+import com.bazaarvoice.emodb.sor.condition.Conditions;
 import com.bazaarvoice.emodb.stash.emr.DocumentId;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.bazaarvoice.emodb.stash.emr.DocumentVersion;
@@ -16,10 +17,9 @@ import com.bazaarvoice.ostrich.pool.ServicePoolBuilder;
 import com.bazaarvoice.ostrich.pool.ServicePoolProxies;
 import com.bazaarvoice.ostrich.retry.ExponentialBackoffRetry;
 import com.codahale.metrics.MetricRegistry;
-import com.google.common.base.Stopwatch;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
-import com.google.common.io.Closeables;
+import com.google.common.io.Closer;
 import io.dropwizard.client.HttpClientConfiguration;
 import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.retry.RetryNTimes;
@@ -30,12 +30,14 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Tuple2;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.net.URI;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
@@ -44,29 +46,35 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
 
     private final static Logger _log = LoggerFactory.getLogger(DatabusReceiver.class);
 
-    private final String _subscription;
+    private final String _subscriptionName;
+    private final String _subscriptionConditionString;
     private final String _apiKey;
     private final String _cluster;
     private final String _zooKeeperConnectString;
     private final String _zooKeeperNamespace;
     private final String _emoUrl;
 
+    private volatile Databus _databus;
+    private volatile Closer _databusCloser;
+    private volatile com.bazaarvoice.emodb.sor.condition.Condition _subscriptionCondition;
+    private volatile ScheduledExecutorService _service;
     private volatile ReentrantLock _lock = new ReentrantLock();
     private volatile Condition _receiverStopped = _lock.newCondition();
 
-    public static DatabusReceiver fromHostAndPort(String subscription, String apiKey, String cluster, URI baseUri) {
-        return new DatabusReceiver(subscription, apiKey, cluster, null, null, baseUri.toString());
+    public static DatabusReceiver fromHostAndPort(String subscriptionName, String subscriptionCondition, String apiKey, String cluster, URI baseUri) {
+        return new DatabusReceiver(subscriptionName, subscriptionCondition, apiKey, cluster, null, null, baseUri.toString());
     }
 
-    public static DatabusReceiver fromHostDiscovery(String subscription, String apiKey, String cluster,
+    public static DatabusReceiver fromHostDiscovery(String subscriptionName,  String subscriptionCondition, String apiKey, String cluster,
                                                     String zooKeeperConnectString, String zooKeeperNamespace) {
-        return new DatabusReceiver(subscription, apiKey, cluster, zooKeeperConnectString, zooKeeperNamespace, null);
+        return new DatabusReceiver(subscriptionName, subscriptionCondition, apiKey, cluster, zooKeeperConnectString, zooKeeperNamespace, null);
     }
 
-    private DatabusReceiver(String subscription, String apiKey, String cluster, String zooKeeperConnectString,
-                            String zooKeeperNamespace, String emoUrl) {
+    private DatabusReceiver(String subscriptionName,  String subscriptionCondition, String apiKey, String cluster,
+                            String zooKeeperConnectString, String zooKeeperNamespace, String emoUrl) {
         super(StorageLevel.MEMORY_AND_DISK_2());
-        _subscription = subscription;
+        _subscriptionName = subscriptionName;
+        _subscriptionConditionString = subscriptionCondition;
         _apiKey = apiKey;
         _cluster = cluster;
         _zooKeeperConnectString = zooKeeperConnectString;
@@ -76,7 +84,20 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
 
     @Override
     public void onStart() {
-         new Thread(this::receiveDatabusEvents).start();
+        startDatabus();
+
+        _service = Executors.newScheduledThreadPool(2);
+
+        // Subscribe
+        _subscriptionCondition = Conditions.fromString(_subscriptionConditionString);
+        subscribe();
+
+        // Start a thread to resubscribe every 4 hours starting at a random offset in the future
+        int fourHoursMs = (int) TimeUnit.HOURS.toMillis(4);
+        _service.scheduleAtFixedRate(this::subscribe, new Random().nextInt(fourHoursMs), fourHoursMs, TimeUnit.MILLISECONDS);
+
+        // Start a thread to continuously poll
+        _service.submit(this::receiveDatabusEvents);
     }
 
     @Override
@@ -88,18 +109,30 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
             }
         } catch (InterruptedException e) {
             _log.warn("Unexpected interrupt during receiver stop", e);
+        } finally {
+            stopDatabus();
+            _service.shutdown();
+            try {
+                if (!_service.awaitTermination(10, TimeUnit.SECONDS)) {
+                    _log.warn("Service taking unusually long to shut down");
+                }
+            } catch (InterruptedException e) {
+                _log.warn("Thread interrupted waiting for services to shut down");
+            } finally {
+                _databus = null;
+                _databusCloser = null;
+                _service = null;
+            }
         }
     }
 
     private void receiveDatabusEvents() {
-        Tuple2<Databus, List<Closeable>> t = createDatabusClient();
-
         try {
-            Databus databus = t._1;
             List<String> eventKeys = Lists.newArrayListWithCapacity(50);
+            boolean pausePolling = false;
 
-            while (!isStopped()) {
-                PollResult pollResult = databus.poll(_subscription, Duration.standardSeconds(30), 50);
+            while (!isStopped() && !pausePolling) {
+                PollResult pollResult = _databus.poll(_subscriptionName, Duration.standardSeconds(30), 50);
 
                 Iterator<Tuple2<DocumentMetadata, String>> documents = Iterators.transform(pollResult.getEventIterator(), event -> {
                     // Lazily build the list of event keys to ack
@@ -110,29 +143,24 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
 
                 if (documents.hasNext()) {
                     store(documents);
-                    databus.acknowledge(_subscription, eventKeys);
+                    _databus.acknowledge(_subscriptionName, eventKeys);
                     eventKeys.clear();
                 }
 
-                if (!pollResult.hasMoreEvents()) {
-                    sleep();
-                }
+                pausePolling = !pollResult.hasMoreEvents();
+            }
+
+            if (!isStopped()) {
+                // Pause polling for one second then start again
+                _service.schedule(this::receiveDatabusEvents, 1, TimeUnit.SECONDS);
             }
         } catch (Exception e) {
             restart("Databus poll failed unexpectedly", e);
-        } finally {
-            try {
-                for (Closeable closeable : t._2) {
-                    Closeables.close(closeable, true);
-                }
-            } catch (IOException ignore) {
-                // Won't happen, exception already caught
-            }
         }
     }
 
-    private Tuple2<Databus, List<Closeable>> createDatabusClient() {
-        List<Closeable> closeables = Lists.newArrayListWithCapacity(2);
+    private void startDatabus() {
+        _databusCloser = Closer.create();
 
         MetricRegistry metricRegistry = new MetricRegistry();
         HttpClientConfiguration clientConfiguration = new HttpClientConfiguration();
@@ -155,15 +183,29 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
             zkConfig.setRetryPolicy(new RetryNTimes(3, 50));
             CuratorFramework curator = zkConfig.newCurator();
             curator.start();
-            closeables.add(curator);
+            _databusCloser.register(curator);
 
             servicePoolBuilder = servicePoolBuilder.withHostDiscovery(new ZooKeeperHostDiscovery(curator, databusFactory.getServiceName(), metricRegistry));
         }
 
-        Databus databus = servicePoolBuilder.buildProxy(new ExponentialBackoffRetry(3, 10, 100, TimeUnit.MILLISECONDS));
-        closeables.add(0, () -> ServicePoolProxies.close(databus));
+        _databus = servicePoolBuilder.buildProxy(new ExponentialBackoffRetry(3, 10, 100, TimeUnit.MILLISECONDS));
+        _databusCloser.register(() -> ServicePoolProxies.close(_databus));
+    }
 
-        return new Tuple2<>(databus, closeables);
+    private void stopDatabus() {
+        try {
+            _databusCloser.close();
+        } catch (IOException e) {
+            _log.warn("Failed to close databus connection", e);
+        }
+    }
+
+    private void subscribe() {
+        try {
+            _databus.subscribe(_subscriptionName, _subscriptionCondition, Duration.standardDays(1), Duration.standardSeconds(30), false);
+        } catch (Exception e) {
+            _log.warn("Failed to subscribe to {}", _subscriptionName, e);
+        }
     }
 
     private Tuple2<DocumentMetadata, String> toDocumentTuple(Map<String, Object> map) {
@@ -179,30 +221,5 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
         String json = JsonHelper.asJson(map);
 
         return new Tuple2<>(new DocumentMetadata(documentId, documentVersion, deleted), json);
-    }
-
-    private void sleep() {
-        boolean locked = false;
-        try {
-            Stopwatch stopwatch = Stopwatch.createStarted();
-            if (!isStopped() && _lock.tryLock(1, TimeUnit.SECONDS)) {
-                locked = true;
-                if (!isStopped()) {
-                    long awaitMs = 1000 - stopwatch.elapsed(TimeUnit.MILLISECONDS);
-                    if (awaitMs > 0) {
-                        _receiverStopped.await(awaitMs, TimeUnit.MILLISECONDS);
-                    }
-                }
-            }
-        } catch (InterruptedException e) {
-            if (!isStopped()) {
-                _log.warn("Sleep unexpectedly interrupted");
-            }
-        } finally {
-            if (locked) {
-                _lock.unlock();
-            }
-        }
-
     }
 }

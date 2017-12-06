@@ -88,6 +88,9 @@
                         <relocation>
                             <pattern>org.apache</pattern>
                             <shadedPattern>databusstreaming.repackaged.org.apache</shadedPattern>
+                            <excludes>
+                                <exclude>org.apache.spark.**</exclude>
+                            </excludes>
                         </relocation>
                         <relocation>
                             <pattern>org.eclipse</pattern>
