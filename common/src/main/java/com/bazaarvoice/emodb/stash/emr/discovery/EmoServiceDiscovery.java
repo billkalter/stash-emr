@@ -1,0 +1,198 @@
+package com.bazaarvoice.emodb.stash.emr.discovery;
+
+import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.google.common.base.Throwables;
+import com.google.common.collect.Lists;
+import com.google.common.io.Closeables;
+import com.google.common.util.concurrent.AbstractService;
+import com.google.common.util.concurrent.ThreadFactoryBuilder;
+import org.apache.curator.framework.CuratorFramework;
+import org.apache.curator.framework.CuratorFrameworkFactory;
+import org.apache.curator.framework.imps.CuratorFrameworkState;
+import org.apache.curator.framework.recipes.cache.ChildData;
+import org.apache.curator.framework.recipes.cache.PathChildrenCache;
+import org.apache.curator.retry.RetryNTimes;
+import org.apache.curator.utils.ZKPaths;
+
+import javax.ws.rs.core.UriBuilder;
+import java.io.IOException;
+import java.io.Serializable;
+import java.net.URI;
+import java.net.UnknownHostException;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.ThreadFactory;
+
+import static com.google.common.base.Preconditions.checkNotNull;
+
+public abstract class EmoServiceDiscovery extends AbstractService implements Serializable {
+
+    private final static ObjectMapper OBJECT_MAPPER = new ObjectMapper();
+
+    private final String _zookeeperConnectionString;
+    private final String _zookeeperNamespace;
+    private final String _service;
+    private final URI _directUri;
+
+    private volatile CuratorFramework _curator;
+    private volatile PathChildrenCache _pathCache;
+
+    protected EmoServiceDiscovery(String zookeeperConnectionString, String zookeeperNamespace, String service,
+                                  URI directUri) {
+        _zookeeperConnectionString = zookeeperConnectionString;
+        _zookeeperNamespace = zookeeperNamespace;
+        _service = service;
+        _directUri = directUri;
+    }
+
+    @Override
+    protected void doStart() {
+        if (_zookeeperConnectionString != null) {
+            try {
+                createStartedCurator();
+                startNodeListener();
+            } catch (Exception e) {
+                doStop();
+                throw Throwables.propagate(e);
+            }
+        }
+    }
+
+    @Override
+    protected void doStop() {
+        try {
+            if (_pathCache != null) {
+                Closeables.close(_pathCache, true);
+            }
+            if (_curator != null && _curator.getState() == CuratorFrameworkState.STARTED) {
+                Closeables.close(_curator, true);
+            }
+        } catch (IOException ignore) {
+            // Already managed
+        }
+    }
+
+    private void createStartedCurator() throws Exception {
+        ThreadFactory threadFactory = new ThreadFactoryBuilder()
+                .setNameFormat("DatabusCurator-%d")
+                .setDaemon(true)
+                .build();
+
+        _curator = CuratorFrameworkFactory.builder()
+                .connectString(_zookeeperConnectionString)
+                .retryPolicy(new RetryNTimes(5, 100))
+                .namespace(_zookeeperNamespace)
+                .threadFactory(threadFactory)
+                .build();
+
+        _curator.start();
+    }
+
+    private void startNodeListener() throws Exception {
+        String path = ZKPaths.makePath( "/ostrich", _service);
+
+        _pathCache = new PathChildrenCache(_curator, path, true);
+        _pathCache.getListenable().addListener((curator, event) -> rebuildHosts());
+        _pathCache.start(PathChildrenCache.StartMode.BUILD_INITIAL_CACHE);
+        rebuildHosts();
+    }
+
+    public URI getBaseUri() throws UnknownHostException {
+        URI uri = getBaseUriFromDiscovery();
+        if (uri == null) {
+            if (_directUri == null) {
+                throw new UnknownHostException("No hosts discovered");
+            }
+            uri = _directUri;
+        }
+        return uri;
+    }
+
+    private void rebuildHosts() throws IOException {
+        List<ChildData> currentData = _pathCache.getCurrentData();
+        List<Host> hosts = Lists.newArrayListWithCapacity(currentData.size());
+        for (ChildData childData : currentData) {
+            RegistrationData registrationData = OBJECT_MAPPER.readValue(childData.getData(), RegistrationData.class);
+            PayloadData payloadData = OBJECT_MAPPER.readValue(registrationData.payload, PayloadData.class);
+            URI baseUri = UriBuilder.fromUri(payloadData.serviceUrl).replacePath(null).build();
+            hosts.add(new Host(registrationData.id, baseUri));
+        }
+        Collections.sort(hosts);
+        hostsChanged(hosts);
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private static class RegistrationData {
+        public String id;
+        public String payload;
+    }
+
+    @JsonIgnoreProperties(ignoreUnknown = true)
+    private static class PayloadData {
+        public String serviceUrl;
+    }
+
+    protected static class Host implements Comparable<Host> {
+        public String id;
+        public URI baseUri;
+
+        public Host(String id, URI baseUri) {
+            this.id = id;
+            this.baseUri = baseUri;
+        }
+
+        @Override
+        public int compareTo(Host o) {
+            return id.compareTo(o.id);
+        }
+    }
+
+    abstract protected void hostsChanged(List<Host> sortedHosts);
+
+    abstract protected URI getBaseUriFromDiscovery();
+
+    abstract protected static class Builder implements Serializable {
+        private String _service;
+        private String _zookeeperConnectionString;
+        private String _zookeeperNamespace;
+        private URI _directUri;
+
+        public Builder(String service) {
+            _service = checkNotNull(service, "Service name is required");
+        }
+
+        public Builder withZookeeperDiscovery(String zookeeperConnectionString, String zookeeperNamespace) {
+            _zookeeperConnectionString = checkNotNull(zookeeperConnectionString, "Connection string is required");
+            _zookeeperNamespace = zookeeperNamespace;
+            return this;
+        }
+
+        public Builder withDirectUri(URI directUri) {
+            _directUri = directUri;
+            return this;
+        }
+
+        protected String getService() {
+            return _service;
+        }
+
+        protected String getZookeeperConnectionString() {
+            return _zookeeperConnectionString;
+        }
+
+        protected String getZookeeperNamespace() {
+            return _zookeeperNamespace;
+        }
+
+        protected URI getDirectUri() {
+            return _directUri;
+        }
+
+        protected void validate() {
+            if (_zookeeperConnectionString == null && _directUri == null) {
+                throw new IllegalStateException("At least one service discovery method is required");
+            }
+        }
+    }
+}
