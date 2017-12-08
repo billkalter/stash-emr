@@ -13,10 +13,10 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.SaveMode;
+import org.apache.spark.streaming.Duration;
 import org.apache.spark.streaming.Durations;
 import org.apache.spark.streaming.api.java.JavaDStream;
 import org.apache.spark.streaming.api.java.JavaPairDStream;
-import org.apache.spark.streaming.api.java.JavaReceiverInputDStream;
 import org.apache.spark.streaming.api.java.JavaStreamingContext;
 import scala.Tuple2;
 
@@ -60,6 +60,9 @@ public class DatabusAccumulator implements Serializable {
                 .help("EmoDB URL (if using direct EmoDB access)");
         argParser.addArgument("--master")
                 .help("Spark master URL");
+        argParser.addArgument("--batchInterval")
+                .setDefault("PT5M")
+                .help("Streaming batch interval");
 
         Namespace ns = argParser.parseArgs(args);
 
@@ -72,6 +75,7 @@ public class DatabusAccumulator implements Serializable {
         String apiKey = ns.getString("apikey");
         String destination = ns.getString("destination");
         String master = ns.getString("master");
+        Duration batchInterval = Durations.milliseconds(java.time.Duration.parse(ns.getString("batchInterval")).toMillis());
 
         String zkConnectionString = ns.getString("zkConnectionString");
         String zkNamespace = ns.getString("zkNamespace");
@@ -91,18 +95,18 @@ public class DatabusAccumulator implements Serializable {
 
         DatabusReceiver databusReceiver = new DatabusReceiver(databusDiscoveryBuilder, subscriptionName, subscriptionCondition, apiKey);
         
-        new DatabusAccumulator().runAccumulator(databusReceiver, destination, master);
+        new DatabusAccumulator().runAccumulator(databusReceiver, destination, master, batchInterval);
     }
 
     public void runAccumulator(final DatabusReceiver databusReceiver, final String destination,
-                               @Nullable final String master) throws InterruptedException {
+                               @Nullable final String master, Duration batchInterval) throws InterruptedException {
 
         SparkConf sparkConf = new SparkConf().setAppName("DatabusAccumulator");
         if (master != null) {
             sparkConf.setMaster(master);
         }
         
-        JavaStreamingContext streamingContext = new JavaStreamingContext(sparkConf, Durations.seconds(10));
+        JavaStreamingContext streamingContext = new JavaStreamingContext(sparkConf, batchInterval);
 
         JavaDStream<Tuple2<DocumentMetadata, String>> eventStream = streamingContext.receiverStream(databusReceiver);
         // Group events by document id
