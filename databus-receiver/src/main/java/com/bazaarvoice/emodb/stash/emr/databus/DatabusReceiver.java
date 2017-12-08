@@ -1,85 +1,76 @@
 package com.bazaarvoice.emodb.stash.emr.databus;
 
-import com.bazaarvoice.curator.dropwizard.ZooKeeperConfiguration;
-import com.bazaarvoice.emodb.common.json.JsonHelper;
-import com.bazaarvoice.emodb.databus.api.Databus;
-import com.bazaarvoice.emodb.databus.api.PollResult;
-import com.bazaarvoice.emodb.databus.client.DatabusClientFactory;
-import com.bazaarvoice.emodb.databus.client.DatabusFixedHostDiscoverySource;
-import com.bazaarvoice.emodb.sor.api.Intrinsic;
-import com.bazaarvoice.emodb.sor.condition.Conditions;
-import com.bazaarvoice.emodb.stash.emr.DocumentId;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
-import com.bazaarvoice.emodb.stash.emr.DocumentVersion;
-import com.bazaarvoice.ostrich.ServiceFactory;
-import com.bazaarvoice.ostrich.discovery.zookeeper.ZooKeeperHostDiscovery;
-import com.bazaarvoice.ostrich.pool.ServicePoolBuilder;
-import com.bazaarvoice.ostrich.pool.ServicePoolProxies;
-import com.bazaarvoice.ostrich.retry.ExponentialBackoffRetry;
-import com.codahale.metrics.MetricRegistry;
+import com.fasterxml.jackson.core.JsonParser;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.JsonToken;
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.DeserializationContext;
+import com.fasterxml.jackson.databind.JsonDeserializer;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
+import com.google.common.base.Strings;
+import com.google.common.base.Throwables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
-import com.google.common.io.Closer;
-import io.dropwizard.client.HttpClientConfiguration;
-import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.retry.RetryNTimes;
+import org.apache.http.HttpStatus;
 import org.apache.spark.storage.StorageLevel;
 import org.apache.spark.streaming.receiver.Receiver;
-import org.joda.time.Duration;
+import org.glassfish.jersey.client.ClientConfig;
+import org.glassfish.jersey.client.ClientProperties;
+import org.glassfish.jersey.client.JerseyClient;
+import org.glassfish.jersey.client.JerseyClientBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Tuple2;
 
+import javax.ws.rs.client.Entity;
+import javax.ws.rs.core.MediaType;
+import javax.ws.rs.core.Response;
+import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
+import java.io.InputStream;
 import java.net.URI;
+import java.time.Duration;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 import java.util.Random;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
+
+import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.base.Preconditions.checkNotNull;
 
 public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> {
 
     private final static Logger _log = LoggerFactory.getLogger(DatabusReceiver.class);
+    private final static ObjectMapper _objectMapper = new ObjectMapper();
 
-    private final String _subscriptionName;
-    private final String _subscriptionConditionString;
+    private final DatabusDiscovery.Builder _databusDiscoveryBuilder;
+    private final String _subscription;
+    private final String _condition;
     private final String _apiKey;
-    private final String _cluster;
-    private final String _zooKeeperConnectString;
-    private final String _zooKeeperNamespace;
-    private final String _emoUrl;
 
-    private volatile Databus _databus;
-    private volatile Closer _databusCloser;
-    private volatile com.bazaarvoice.emodb.sor.condition.Condition _subscriptionCondition;
+    private volatile DatabusDiscovery _databusDiscovery;
+    private volatile JerseyClient _client;
     private volatile ScheduledExecutorService _service;
     private volatile ReentrantLock _lock = new ReentrantLock();
     private volatile Condition _receiverStopped = _lock.newCondition();
 
-    public static DatabusReceiver fromHostAndPort(String subscriptionName, String subscriptionCondition, String apiKey, String cluster, URI baseUri) {
-        return new DatabusReceiver(subscriptionName, subscriptionCondition, apiKey, cluster, null, null, baseUri.toString());
-    }
-
-    public static DatabusReceiver fromHostDiscovery(String subscriptionName,  String subscriptionCondition, String apiKey, String cluster,
-                                                    String zooKeeperConnectString, String zooKeeperNamespace) {
-        return new DatabusReceiver(subscriptionName, subscriptionCondition, apiKey, cluster, zooKeeperConnectString, zooKeeperNamespace, null);
-    }
-
-    private DatabusReceiver(String subscriptionName,  String subscriptionCondition, String apiKey, String cluster,
-                            String zooKeeperConnectString, String zooKeeperNamespace, String emoUrl) {
+    public DatabusReceiver(DatabusDiscovery.Builder databusDiscoveryBuilder, String subscription, String condition, String apiKey) {
         super(StorageLevel.MEMORY_AND_DISK_2());
-        _subscriptionName = subscriptionName;
-        _subscriptionConditionString = subscriptionCondition;
+        _databusDiscoveryBuilder = checkNotNull(databusDiscoveryBuilder, "Databus discovery builder is required");
+        checkArgument(!Strings.isNullOrEmpty(subscription), "Valid subscription is required");
+        _subscription = subscription;
+        checkArgument(!Strings.isNullOrEmpty(condition), "Valid condition is required");
+        _condition = condition;
+        checkArgument(!Strings.isNullOrEmpty(apiKey), "Valid API key is required");
         _apiKey = apiKey;
-        _cluster = cluster;
-        _zooKeeperConnectString = zooKeeperConnectString;
-        _zooKeeperNamespace = zooKeeperNamespace;
-        _emoUrl = emoUrl;
     }
 
     @Override
@@ -89,7 +80,6 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
         _service = Executors.newScheduledThreadPool(2);
 
         // Subscribe
-        _subscriptionCondition = Conditions.fromString(_subscriptionConditionString);
         subscribe();
 
         // Start a thread to resubscribe every 4 hours starting at a random offset in the future
@@ -119,35 +109,101 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
             } catch (InterruptedException e) {
                 _log.warn("Thread interrupted waiting for services to shut down");
             } finally {
-                _databus = null;
-                _databusCloser = null;
                 _service = null;
             }
         }
     }
+    
+    private void startDatabus() {
+        _databusDiscovery = _databusDiscoveryBuilder.withSubscription(_subscription).build();
+        _databusDiscovery.startAsync();
+        try {
+            _databusDiscovery.awaitRunning(30, TimeUnit.SECONDS);
+        } catch (TimeoutException e) {
+            _log.error("Databus discovery did not start in a reasonable time");
+            throw Throwables.propagate(e);
+        }
+
+        _client = JerseyClientBuilder.createClient(new ClientConfig()
+                .property(ClientProperties.CONNECT_TIMEOUT, (int) Duration.ofSeconds(5).toMillis())
+                .property(ClientProperties.READ_TIMEOUT, (int) Duration.ofSeconds(10).toMillis()));
+    }
+
+    private void stopDatabus() {
+        _databusDiscovery.stopAsync();
+        _databusDiscovery = null;
+        _client.close();
+        _client = null;
+    }
+
 
     private void receiveDatabusEvents() {
         try {
             List<String> eventKeys = Lists.newArrayListWithCapacity(50);
-            boolean pausePolling = false;
+            boolean databusEmpty = false;
 
-            while (!isStopped() && !pausePolling) {
-                PollResult pollResult = _databus.poll(_subscriptionName, Duration.standardSeconds(30), 50);
 
-                Iterator<Tuple2<DocumentMetadata, String>> documents = Iterators.transform(pollResult.getEventIterator(), event -> {
+            while (!isStopped() && !databusEmpty) {
+
+                URI uri = UriBuilder.fromUri(_databusDiscovery.getBaseUri())
+                        .path("bus")
+                        .path("1")
+                        .path(_subscription)
+                        .path("poll")
+                        .queryParam("ttl", 30)
+                        .queryParam("limit", 50)
+                        .build();
+                Response response = _client.target(uri).request()
+                        .accept(MediaType.APPLICATION_JSON_TYPE)
+                        .header("X-BV-API-Key", _apiKey)
+                        .get();
+
+                List<Event> events;
+                try {
+                    if (response.getStatus() != HttpStatus.SC_OK) {
+                        throw new PollFailedException(_subscription, response.getStatus(), response.readEntity(String.class));
+                    }
+
+                    String databusEmptyHeader = response.getHeaderString("X-BV-Databus-Empty");
+                    if (databusEmptyHeader != null) {
+                        databusEmpty = Boolean.parseBoolean(databusEmptyHeader);
+                    }
+
+                    InputStream entity = response.readEntity(InputStream.class);
+                    events = _objectMapper.readValue(entity, new TypeReference<List<Event>>() {});
+                } finally {
+                    response.close();
+                }
+
+                Iterator<Tuple2<DocumentMetadata, String>> documents = Iterators.transform(events.iterator(), event -> {
                     // Lazily build the list of event keys to ack
-                    eventKeys.add(event.getEventKey());
-                    return toDocumentTuple(event.getContent());
+                    eventKeys.add(event.eventKey);
+                    return new Tuple2<>(event.documentMetadata, event.content);
 
                 });
 
                 if (documents.hasNext()) {
                     store(documents);
-                    _databus.acknowledge(_subscriptionName, eventKeys);
+
+                    URI ackUri = UriBuilder.fromUri(_databusDiscovery.getBaseUri())
+                            .path("bus")
+                            .path("1")
+                            .path(_subscription)
+                            .path("ack")
+                            .build();
+
+                    response = _client.target(ackUri).request()
+                            .accept(MediaType.APPLICATION_JSON_TYPE)
+                            .header("X-BV-API-Key", _apiKey)
+                            .post(Entity.json(_objectMapper.writeValueAsString(eventKeys)));
+
+                    if (response.getStatus() != HttpStatus.SC_OK) {
+                        _log.warn("Events ack failed with response: code={}, entity={}", response.getStatus(), response.readEntity(String.class));
+                    }
+
+                    response.close();
                     eventKeys.clear();
                 }
-
-                pausePolling = !pollResult.hasMoreEvents();
             }
 
             if (!isStopped()) {
@@ -159,67 +215,76 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
         }
     }
 
-    private void startDatabus() {
-        _databusCloser = Closer.create();
-
-        MetricRegistry metricRegistry = new MetricRegistry();
-        HttpClientConfiguration clientConfiguration = new HttpClientConfiguration();
-        clientConfiguration.setConnectionTimeout(io.dropwizard.util.Duration.seconds(5));
-        clientConfiguration.setTimeout(io.dropwizard.util.Duration.seconds(10));
-
-        ServiceFactory<Databus> databusFactory =
-                DatabusClientFactory.forClusterAndHttpConfiguration(_cluster, clientConfiguration, metricRegistry)
-                        .usingCredentials(_apiKey);
-
-        ServicePoolBuilder<Databus> servicePoolBuilder = ServicePoolBuilder.create(Databus.class)
-                .withServiceFactory(databusFactory);
-
-        if (_emoUrl != null) {
-            servicePoolBuilder = servicePoolBuilder.withHostDiscoverySource(new DatabusFixedHostDiscoverySource(_emoUrl));
-        } else {
-            ZooKeeperConfiguration zkConfig = new ZooKeeperConfiguration();
-            zkConfig.setNamespace(_zooKeeperNamespace);
-            zkConfig.setConnectString(_zooKeeperConnectString);
-            zkConfig.setRetryPolicy(new RetryNTimes(3, 50));
-            CuratorFramework curator = zkConfig.newCurator();
-            curator.start();
-            _databusCloser.register(curator);
-
-            servicePoolBuilder = servicePoolBuilder.withHostDiscovery(new ZooKeeperHostDiscovery(curator, databusFactory.getServiceName(), metricRegistry));
-        }
-
-        _databus = servicePoolBuilder.buildProxy(new ExponentialBackoffRetry(3, 10, 100, TimeUnit.MILLISECONDS));
-        _databusCloser.register(() -> ServicePoolProxies.close(_databus));
-    }
-
-    private void stopDatabus() {
-        try {
-            _databusCloser.close();
-        } catch (IOException e) {
-            _log.warn("Failed to close databus connection", e);
-        }
-    }
-
     private void subscribe() {
+        Response response = null;
         try {
-            _databus.subscribe(_subscriptionName, _subscriptionCondition, Duration.standardDays(1), Duration.standardSeconds(30), false);
+            URI uri = UriBuilder.fromUri(_databusDiscovery.getBaseUri())
+                    .path("bus")
+                    .path("1")
+                    .path(_subscription)
+                    .queryParam("ttl", Duration.ofDays(7).getSeconds())
+                    .queryParam("eventTtl", Duration.ofDays(2).getSeconds())
+                    .queryParam("includeDefaultJoinFilter", "false")
+                    .build();
+
+            response = _client.target(uri).request()
+                    .accept(MediaType.APPLICATION_JSON_TYPE)
+                    .header("X-BV-API-Key", _apiKey)
+                    .put(Entity.entity(_condition, "application/x.json-condition"));
+
+            if (response.getStatus() != HttpStatus.SC_OK) {
+                throw new SubscribeFailedException(_subscription, response.getStatus(), response.readEntity(String.class));
+            }
         } catch (Exception e) {
-            _log.warn("Failed to subscribe to {}", _subscriptionName, e);
+            _log.warn("Failed to subscribe to {}", _subscription, e);
+        } finally {
+            if (response != null) {
+                response.close();
+            }
         }
     }
 
-    private Tuple2<DocumentMetadata, String> toDocumentTuple(Map<String, Object> map) {
-        String table = Intrinsic.getTable(map);
-        String key = Intrinsic.getId(map);
-        DocumentId documentId = new DocumentId(table, key);
+    @JsonDeserialize(using = EventDeserializer.class)
+    private static class Event {
+        String eventKey;
+        String content;
+        DocumentMetadata documentMetadata;
 
-        long version = Intrinsic.getVersion(map);
-        long lastUpdateTs = Intrinsic.getLastUpdateAt(map).getTime();
-        DocumentVersion documentVersion = new DocumentVersion(version, lastUpdateTs);
+        public Event(String eventKey, String content) throws IOException {
+            this.eventKey = eventKey;
+            this.content = content;
+            this.documentMetadata = _objectMapper.readValue(content, DocumentMetadata.class);
+        }
+    }
 
-        boolean deleted = Intrinsic.isDeleted(map);
-        String json = JsonHelper.asJson(map);
+    private static class EventDeserializer extends JsonDeserializer<Event> {
+        @Override
+        public Event deserialize(JsonParser parser, DeserializationContext ctxt)
+                throws IOException, JsonProcessingException {
+            JsonToken token = parser.getCurrentToken();
+            if (token != JsonToken.START_OBJECT) {
+                throw ctxt.wrongTokenException(parser, JsonToken.START_OBJECT, "Map expected");
+            }
 
-        return new Tuple2<>(new DocumentMetadata(documentId, documentVersion, deleted), json);
+            String eventKey = null;
+            String content = null;
+
+            while ((token = parser.nextToken()) != JsonToken.END_OBJECT) {
+                assert token == JsonToken.FIELD_NAME;
+
+                String fieldName = parser.getText();
+                parser.nextToken();
+                
+                if ("eventKey".equals(fieldName)) {
+                    eventKey = parser.getValueAsString();
+                } else if ("content".equals(fieldName)) {
+                    content = parser.readValueAs(JsonNode.class).toString();
+                } else {
+                    parser.skipChildren();
+                }
+            }
+
+            return new Event(eventKey, content);
+        }
     }
 }

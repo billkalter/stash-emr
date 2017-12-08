@@ -7,7 +7,6 @@ import com.google.common.collect.Lists;
 import com.google.common.util.concurrent.Futures;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
-import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.Namespace;
 import org.apache.spark.SparkConf;
 import org.apache.spark.sql.Dataset;
@@ -15,6 +14,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.SaveMode;
 import org.apache.spark.streaming.Durations;
+import org.apache.spark.streaming.api.java.JavaDStream;
 import org.apache.spark.streaming.api.java.JavaPairDStream;
 import org.apache.spark.streaming.api.java.JavaReceiverInputDStream;
 import org.apache.spark.streaming.api.java.JavaStreamingContext;
@@ -71,34 +71,26 @@ public class DatabusAccumulator implements Serializable {
         String subscriptionCondition = ns.getString("subscriptionCondition");
         String apiKey = ns.getString("apikey");
         String destination = ns.getString("destination");
-        DatabusReceiver databusReceiver;
+        String master = ns.getString("master");
 
         String zkConnectionString = ns.getString("zkConnectionString");
         String zkNamespace = ns.getString("zkNamespace");
-        String emoUrl = ns.getString("emoUrl");
+        String emoUrlString = ns.getString("emoUrl");
 
-        if (zkConnectionString != null) {
-            if (zkNamespace == null) {
-                throw new ArgumentParserException("All ZooKeeper arguments are required for discovery", argParser);
-            }
-            if (emoUrl != null) {
-                throw new ArgumentParserException("Only one Databus lookup method is permitted", argParser);
-            }
-            databusReceiver = DatabusReceiver.fromHostDiscovery(subscriptionName, subscriptionCondition, apiKey, cluster, zkConnectionString, zkNamespace);
-        } else if (emoUrl == null) {
-            throw new ArgumentParserException("One EmoDB discovery method is required", argParser);
-        } else {
-            if (zkNamespace != null) {
-                throw new ArgumentParserException("Only one Databus lookup method is permitted", argParser);
-            }
-            URI uri = UriBuilder.fromUri(emoUrl)
+        URI emoUri = null;
+        if (emoUrlString != null) {
+            emoUri = UriBuilder.fromUri(emoUrlString)
                     .replacePath(null)
                     .build();
-            databusReceiver = DatabusReceiver.fromHostAndPort(subscriptionName, subscriptionCondition, apiKey, cluster, uri);
         }
 
-        String master = ns.getString("master");
+        DatabusDiscovery.Builder databusDiscoveryBuilder = DatabusDiscovery.builder(cluster)
+                .withSubscription(subscriptionName)
+                .withZookeeperDiscovery(zkConnectionString, zkNamespace)
+                .withDirectUri(emoUri);
 
+        DatabusReceiver databusReceiver = new DatabusReceiver(databusDiscoveryBuilder, subscriptionName, subscriptionCondition, apiKey);
+        
         new DatabusAccumulator().runAccumulator(databusReceiver, destination, master);
     }
 
@@ -110,9 +102,9 @@ public class DatabusAccumulator implements Serializable {
             sparkConf.setMaster(master);
         }
         
-        JavaStreamingContext streamingContext = new JavaStreamingContext(sparkConf, Durations.seconds(30));
+        JavaStreamingContext streamingContext = new JavaStreamingContext(sparkConf, Durations.seconds(10));
 
-        JavaReceiverInputDStream<Tuple2<DocumentMetadata, String>> eventStream = streamingContext.receiverStream(databusReceiver);
+        JavaDStream<Tuple2<DocumentMetadata, String>> eventStream = streamingContext.receiverStream(databusReceiver);
         // Group events by document id
         JavaPairDStream<DocumentId, Tuple2<DocumentMetadata, String>> eventsById = eventStream.mapToPair(
                 tuple2 -> new Tuple2<>(tuple2._1.getDocumentId(), tuple2));

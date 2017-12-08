@@ -25,6 +25,18 @@ public class DatabusDiscovery extends PartitionedDiscovery {
             super(checkNotNull(cluster, "Cluster is required") + "-emodb-bus-1");
         }
 
+        @Override
+        public Builder withZookeeperDiscovery(String zookeeperConnectionString, String zookeeperNamespace) {
+            super.withZookeeperDiscovery(zookeeperConnectionString, zookeeperNamespace);
+            return this;
+        }
+
+        @Override
+        public Builder withDirectUri(URI directUri) {
+            super.withDirectUri(directUri);
+            return this;
+        }
+
         public Builder withSubscription(String subscription) {
             _subscription = subscription;
             return this;

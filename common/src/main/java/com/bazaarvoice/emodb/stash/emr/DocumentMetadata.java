@@ -6,8 +6,10 @@ import com.fasterxml.jackson.annotation.JsonProperty;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.google.common.base.Objects;
 
+import java.io.Serializable;
+
 @JsonDeserialize(using = DocumentMetadataDeserializer.class)
-public class DocumentMetadata {
+public class DocumentMetadata implements Serializable {
 
     private final DocumentId _documentId;
     private final DocumentVersion _documentVersion;

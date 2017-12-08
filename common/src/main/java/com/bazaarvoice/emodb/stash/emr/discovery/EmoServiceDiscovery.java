@@ -6,13 +6,9 @@ import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.io.Closeables;
 import com.google.common.util.concurrent.AbstractService;
-import com.google.common.util.concurrent.ThreadFactoryBuilder;
 import org.apache.curator.framework.CuratorFramework;
-import org.apache.curator.framework.CuratorFrameworkFactory;
-import org.apache.curator.framework.imps.CuratorFrameworkState;
 import org.apache.curator.framework.recipes.cache.ChildData;
 import org.apache.curator.framework.recipes.cache.PathChildrenCache;
-import org.apache.curator.retry.RetryNTimes;
 import org.apache.curator.utils.ZKPaths;
 
 import javax.ws.rs.core.UriBuilder;
@@ -22,7 +18,6 @@ import java.net.URI;
 import java.net.UnknownHostException;
 import java.util.Collections;
 import java.util.List;
-import java.util.concurrent.ThreadFactory;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
@@ -35,6 +30,7 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
     private final String _service;
     private final URI _directUri;
 
+    private volatile CuratorFramework _rootCurator;
     private volatile CuratorFramework _curator;
     private volatile PathChildrenCache _pathCache;
 
@@ -50,13 +46,17 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
     protected void doStart() {
         if (_zookeeperConnectionString != null) {
             try {
-                createStartedCurator();
+                _rootCurator = CuratorPool.getStartedCurator(_zookeeperConnectionString);
+                _curator = _rootCurator.usingNamespace(_zookeeperNamespace);
+
                 startNodeListener();
             } catch (Exception e) {
                 doStop();
                 throw Throwables.propagate(e);
             }
         }
+
+        notifyStarted();
     }
 
     @Override
@@ -64,29 +64,17 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
         try {
             if (_pathCache != null) {
                 Closeables.close(_pathCache, true);
+                _pathCache = null;
             }
-            if (_curator != null && _curator.getState() == CuratorFrameworkState.STARTED) {
-                Closeables.close(_curator, true);
+            if (_rootCurator != null) {
+                Closeables.close(_rootCurator, true);
+                _rootCurator = _curator = null;
             }
         } catch (IOException ignore) {
             // Already managed
         }
-    }
 
-    private void createStartedCurator() throws Exception {
-        ThreadFactory threadFactory = new ThreadFactoryBuilder()
-                .setNameFormat("DatabusCurator-%d")
-                .setDaemon(true)
-                .build();
-
-        _curator = CuratorFrameworkFactory.builder()
-                .connectString(_zookeeperConnectionString)
-                .retryPolicy(new RetryNTimes(5, 100))
-                .namespace(_zookeeperNamespace)
-                .threadFactory(threadFactory)
-                .build();
-
-        _curator.start();
+        notifyStopped();
     }
 
     private void startNodeListener() throws Exception {
