@@ -21,6 +21,7 @@
         <module>databus-receiver</module>
         <module>databus-accumulator</module>
         <module>stash-generator</module>
+        <module>integration</module>
     </modules>
 
 </project>

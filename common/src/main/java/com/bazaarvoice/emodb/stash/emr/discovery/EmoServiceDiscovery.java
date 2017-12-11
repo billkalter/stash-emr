@@ -19,6 +19,7 @@ import java.net.UnknownHostException;
 import java.util.Collections;
 import java.util.List;
 
+import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 public abstract class EmoServiceDiscovery extends AbstractService implements Serializable {
@@ -151,7 +152,8 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
         }
 
         public Builder withZookeeperDiscovery(String zookeeperConnectionString, String zookeeperNamespace) {
-            _zookeeperConnectionString = checkNotNull(zookeeperConnectionString, "Connection string is required");
+            checkArgument(zookeeperConnectionString != null || zookeeperNamespace == null, "Connection string is required");
+            _zookeeperConnectionString = zookeeperConnectionString;
             _zookeeperNamespace = zookeeperNamespace;
             return this;
         }
