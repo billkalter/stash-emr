@@ -167,7 +167,7 @@ public class StashGenerator {
         });
 
         // TODO:  The following is just dumping data.  More should follow
-        
+
         unmodifiedTables.foreach(table -> _log.info("UNMODIFIED TABLE: {}", table));
         mergeTables.foreach(table -> _log.info("MERGE TABLE: {}", table));
     }
@@ -221,6 +221,7 @@ public class StashGenerator {
 
         return dataFrame.select(dataFrame.col(DocumentSchema.TABLE))
                 .where(dataFrame.col(DocumentSchema.POLL_DATE).isin(pollDates.result()))
+                .distinct()
                 .map(value -> value.getString(0), Encoders.STRING())
                 .toJavaRDD();
     }
