@@ -3,8 +3,6 @@ package com.bazaarvoice.emodb.stash.emr.databus;
 import com.bazaarvoice.emodb.stash.emr.DocumentId;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
-import com.google.common.collect.Lists;
-import com.google.common.util.concurrent.Futures;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
@@ -25,8 +23,6 @@ import javax.ws.rs.core.UriBuilder;
 import java.io.Serializable;
 import java.net.URI;
 import java.util.Date;
-import java.util.List;
-import java.util.concurrent.Future;
 
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.POLL_DATE;
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.TABLE;
@@ -48,7 +44,7 @@ public class DatabusAccumulator implements Serializable {
                 .help("Databus subscription condition");
         argParser.addArgument("--apikey")
                 .required(true)
-                .help("Databus API key name");
+                .help("Databus API key");
         argParser.addArgument("--destination")
                 .required(true)
                 .help("Location where databus updates should be written");
@@ -65,9 +61,6 @@ public class DatabusAccumulator implements Serializable {
                 .help("Streaming batch interval");
 
         Namespace ns = argParser.parseArgs(args);
-
-        List<Future> futures = Lists.newArrayListWithCapacity(1);
-        futures.forEach(Futures::getUnchecked);
 
         String cluster = ns.getString("cluster");
         String subscriptionName = ns.getString("subscriptionName");
