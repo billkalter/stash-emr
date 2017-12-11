@@ -1,5 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
+import com.bazaarvoice.emodb.stash.emr.generator.io.StashIO;
 import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
 import com.fasterxml.jackson.databind.util.ISO8601Utils;
 import com.google.common.base.Joiner;
@@ -21,6 +22,9 @@ import org.apache.spark.storage.StorageLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Tuple2;
+import scala.collection.Seq;
+import scala.collection.Seq$;
+import scala.collection.mutable.Builder;
 
 import javax.annotation.Nullable;
 import javax.ws.rs.core.UriBuilder;
@@ -116,8 +120,9 @@ public class StashGenerator {
         }
 
         JavaSparkContext context = new JavaSparkContext(sparkConf);
+        StashIO stashIO = StashIO.forStashAt(stashRoot);
 
-        Tuple2<ZonedDateTime, URI> priorStash = getPriorStash(context, stashRoot);
+        Tuple2<ZonedDateTime, URI> priorStash = getPriorStash(stashIO, stashRoot);
         ZonedDateTime priorStashTime = priorStash._1;
         URI priorStashDir = priorStash._2;
         URI currentStashDir = UriBuilder.fromUri(stashRoot)
@@ -125,7 +130,8 @@ public class StashGenerator {
                 .build();
 
         checkArgument(priorStashTime.isBefore(stashTime), "Cannot create Stash older than existing latest Stash");
-
+        _log.info("Creating Stash to {} merging with previous stash at {}", currentStashDir, priorStashDir);
+        
         // Get all tables that exist in Stash
         JavaPairRDD<String, Short> emoTables = getEmoTableNamesRDD(context, dataStore, existingTablesFile)
                 .mapToPair(tableName -> new Tuple2<>(tableName, TableStatus.EXISTS_IN_EMO));
@@ -156,7 +162,7 @@ public class StashGenerator {
                 .sortBy(t -> t, true, 8);
 
         droppedTables.foreachPartitionAsync(tables -> {
-            _log.info("The following tables contained updates since the last Stash but no longer exist in Emo: [%s]",
+            _log.info("The following tables contained updates since the last Stash but no longer exist in Emo: [{}]",
                     Joiner.on(",").join(tables));
         });
 
@@ -166,15 +172,11 @@ public class StashGenerator {
         mergeTables.foreach(table -> _log.info("MERGE TABLE: {}", table));
     }
 
-    private Tuple2<ZonedDateTime, URI> getPriorStash(JavaSparkContext context, URI stashRoot) {
-        JavaRDD<String> latestFileContents = context.textFile(UriBuilder.fromUri(stashRoot).path("_LATEST").build().toString());
-        long count = latestFileContents.count();
-        if (count != 1) {
-            throw new IllegalStateException("Exactly one latest file entry expected, found " + count);
-        }
+    private Tuple2<ZonedDateTime, URI> getPriorStash(StashIO stashIO, URI stashRoot) throws Exception {
+       String latestFileDir = stashIO.getLatest();
 
-        String latestFileDir = latestFileContents.first();
-
+        _log.info("Latest Stash found prior to the one being generated is {}", latestFileDir);
+        
         ZonedDateTime priorStashDate = STASH_DIR_FORMAT.parse(latestFileDir, ZonedDateTime::from);
         URI priorStashUri = UriBuilder.fromUri(stashRoot).path(latestFileDir).build();
 
@@ -204,11 +206,13 @@ public class StashGenerator {
 
     private JavaRDD<String> getDatabusEventsTablesRDD(JavaSparkContext context, String databusSource,
                                                       ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
-        List <String> pollDates = Lists.newArrayListWithCapacity(2);
+
+        Builder<Object, Seq<Object>> pollDates = Seq$.MODULE$.newBuilder();
+
         // Poll times work on day boundaries, so move to the start of day
         ZonedDateTime pollDate = priorStashTime.truncatedTo(ChronoUnit.DAYS);
         while (pollDate.isBefore(stashTime)) {
-            pollDates.add(toPollTime(pollDate));
+            pollDates.$plus$eq(toPollTime(pollDate));
             pollDate = pollDate.plusDays(1);
         }
 
@@ -216,7 +220,7 @@ public class StashGenerator {
         Dataset<Row> dataFrame = sqlContext.read().schema(DocumentSchema.SCHEMA).parquet(databusSource);
 
         return dataFrame.select(dataFrame.col(DocumentSchema.TABLE))
-                .where(dataFrame.col(DocumentSchema.POLL_DATE).isin(pollDates))
+                .where(dataFrame.col(DocumentSchema.POLL_DATE).isin(pollDates.result()))
                 .map(value -> value.getString(0), Encoders.STRING())
                 .toJavaRDD();
     }
