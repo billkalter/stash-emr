@@ -7,6 +7,7 @@ import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
 import org.apache.spark.SparkConf;
+import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
@@ -22,6 +23,9 @@ import javax.annotation.Nullable;
 import javax.ws.rs.core.UriBuilder;
 import java.io.Serializable;
 import java.net.URI;
+import java.time.Instant;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
 import java.util.Date;
 
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.POLL_DATE;
@@ -98,30 +102,32 @@ public class DatabusAccumulator implements Serializable {
         if (master != null) {
             sparkConf.setMaster(master);
         }
-        
+
         JavaStreamingContext streamingContext = new JavaStreamingContext(sparkConf, batchInterval);
+        Broadcast<String> broadcastDestination = streamingContext.sparkContext().broadcast(destination);
 
         JavaDStream<Tuple2<DocumentMetadata, String>> eventStream = streamingContext.receiverStream(databusReceiver);
         // Group events by document id
         JavaPairDStream<DocumentId, Tuple2<DocumentMetadata, String>> eventsById = eventStream.mapToPair(
                 tuple2 -> new Tuple2<>(tuple2._1.getDocumentId(), tuple2));
         // Dedup events within the stream, keeping only the most recent if multiple updates occurred
-        JavaPairDStream<DocumentId, Tuple2<DocumentMetadata, String>> dedupEvents = eventsById.reduceByKey(this::newestDocumentVersion);
+        JavaPairDStream<DocumentId, Tuple2<DocumentMetadata, String>> dedupEvents =
+                eventsById.reduceByKey(DatabusAccumulator::newestDocumentVersion);
 
         dedupEvents.foreachRDD((rdd, time) -> {
             SQLContext sqlContext = SQLContext.getOrCreate(rdd.context());
             Dataset<Row> dataFrame = sqlContext.createDataFrame(
-                    rdd.values().map(tuple2 -> toRow(tuple2._1, tuple2._2, new Date(time.milliseconds()))),
+                    rdd.values().map(tuple2 -> toRow(tuple2._1, tuple2._2, ZonedDateTime.ofInstant(Instant.ofEpochMilli(time.milliseconds()), ZoneOffset.UTC))),
                     DocumentSchema.SCHEMA);
 
-            dataFrame.write().mode(SaveMode.Append).partitionBy(POLL_DATE, TABLE).parquet(destination);
+            dataFrame.write().mode(SaveMode.Append).partitionBy(POLL_DATE, TABLE).parquet(broadcastDestination.value());
         });
 
         streamingContext.start();
         streamingContext.awaitTermination();
     }
 
-    private Tuple2<DocumentMetadata, String> newestDocumentVersion(Tuple2<DocumentMetadata, String> left, Tuple2<DocumentMetadata, String> right) {
+    private static Tuple2<DocumentMetadata, String> newestDocumentVersion(Tuple2<DocumentMetadata, String> left, Tuple2<DocumentMetadata, String> right) {
         if (left._1.getDocumentVersion().compareTo( right._1.getDocumentVersion()) < 0) {
             return right;
         }

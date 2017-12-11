@@ -10,15 +10,12 @@ import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
 
-import java.text.SimpleDateFormat;
-import java.util.Date;
-import java.util.TimeZone;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
 
 public class DocumentSchema {
-    private static final SimpleDateFormat DATE_FORMAT = new SimpleDateFormat("yyyyMMdd");
-    static {
-        DATE_FORMAT.setTimeZone(TimeZone.getTimeZone("UTC"));
-    }
+    private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
 
     public static final String TABLE = "table";
     public static final String KEY = "key";
@@ -39,7 +36,7 @@ public class DocumentSchema {
                     .add(DataTypes.createStructField(POLL_DATE, DataTypes.StringType, false))
                     .build());
 
-    public static Row toRow(DocumentMetadata metadata, String json, Date pollDate) {
+    public static Row toRow(DocumentMetadata metadata, String json, ZonedDateTime pollTime) {
         return new GenericRow(new Object[] {
                 metadata.getDocumentId().getTable(),
                 metadata.getDocumentId().getKey(),
@@ -47,9 +44,12 @@ public class DocumentSchema {
                 metadata.getDocumentVersion().getLastUpdateTs(),
                 metadata.isDeleted(),
                 json,
-                DATE_FORMAT.format(pollDate)
-
+                toPollTime(pollTime)
         });
+    }
+
+    public static String toPollTime(ZonedDateTime pollTime) {
+        return DATE_FORMAT.format(pollTime);
     }
 
     public static String getTable(Row row) {

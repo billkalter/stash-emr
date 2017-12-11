@@ -20,6 +20,7 @@
         <module>common</module>
         <module>databus-receiver</module>
         <module>databus-accumulator</module>
+        <module>stash-generator</module>
     </modules>
 
 </project>
