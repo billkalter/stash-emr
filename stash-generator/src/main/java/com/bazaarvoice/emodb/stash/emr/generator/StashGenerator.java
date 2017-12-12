@@ -1,5 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
+import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashIO;
 import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
 import com.fasterxml.jackson.databind.util.ISO8601Utils;
@@ -9,11 +10,14 @@ import com.google.common.collect.Lists;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
+import org.apache.spark.Partitioner;
 import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.Optional;
+import org.apache.spark.api.java.function.VoidFunction;
+import org.apache.spark.partial.BoundedDouble;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
@@ -35,9 +39,15 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
+import java.util.concurrent.TimeUnit;
 
 import static com.bazaarvoice.emodb.stash.emr.generator.TableStatus.NA;
+import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
+import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.getJson;
+import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.getMetadata;
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.toPollTime;
 import static com.google.common.base.Preconditions.checkArgument;
 
@@ -171,8 +181,7 @@ public class StashGenerator {
 
         copyExistingStashTables(unmodifiedTables, stashIO, priorStashDir, newStashDir);
 
-        // TODO:  Implement merge algorithm
-        mergeTables.foreach(table -> _log.info("MERGE TABLE: {}", table));
+        copyAndMergeUpdatedStashTables(context, mergeTables, databusSource, stashIO, priorStashDir, newStashDir, priorStashTime, stashTime);
     }
 
     private void copyExistingStashTables(final JavaRDD<String> tables,
@@ -184,6 +193,58 @@ public class StashGenerator {
                         .iterator());
 
         tableFiles.foreachAsync(t -> stashIO.copyTableFile(priorStashDir, newStashDir, t._1, t._2));
+    }
+
+    private void copyAndMergeUpdatedStashTables(final JavaSparkContext context, final JavaRDD<String> tables,
+                                                final String databusSource,
+                                                final StashIO stashIO, final String priorStashDir, final String newStashDir,
+                                                final ZonedDateTime priorStashTime, final ZonedDateTime stashTime) {
+
+        // Get all documents from the updated tables
+
+        JavaPairRDD<String, String> existingTableFiles = tables.flatMapToPair(table ->
+                stashIO.getTableFilesFromStash(priorStashDir, table)
+                        .stream()
+                        .map(file -> new Tuple2<>(table, file))
+                        .iterator());
+
+        JavaPairRDD<DocumentMetadata, String> priorStashDocs = existingTableFiles
+                .flatMap(t -> stashIO.readStashTableFile(priorStashDir, t._1, t._2))
+                .mapToPair(json -> new Tuple2<>(parseJson(json, DocumentMetadata.class), json));
+
+
+        JavaPairRDD<DocumentMetadata, String> updatedStashDocs =
+                getDatabusEventsRDD(context, databusSource, priorStashTime, stashTime);
+
+        JavaPairRDD<DocumentMetadata, String> allStashDocs =
+                priorStashDocs
+                        .union(updatedStashDocs)
+                        .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
+
+        // Extract the document versions and select the latest
+
+        JavaPairRDD<DocumentMetadata, Boolean> latestDocs = allStashDocs.keys()
+                .keyBy(DocumentMetadata::getDocumentId)
+                .reduceByKey((left, right) ->
+                    left.getDocumentVersion().compareTo(right.getDocumentVersion()) > 0 ? left : right)
+                .values()
+                .filter(md -> !md.isDeleted())
+                .mapToPair(md -> new Tuple2<>(md, true))
+                .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
+
+        Map<String, Long> docCountsbyTable = latestDocs
+                .mapToPair(md -> new Tuple2<>(md._1.getDocumentId().getTable(), true))
+                .countByKey();
+
+        // Re-join with the documents to get the most current documents by table
+        JavaPairRDD<String, String> finalDocsByTable =
+                latestDocs.join(allStashDocs)
+                        .mapToPair(t -> new Tuple2<>(t._1.getDocumentId().getTable(), t._2._2))
+                        .partitionBy(new DocumentPartitioner(docCountsbyTable));
+
+        finalDocsByTable.foreachPartitionAsync(t -> {
+            _log.info("BJK: Partition contains: {}", Joiner.on(",").join(Iterators.transform(t, Tuple2::_1)));
+        });
     }
 
     private Tuple2<ZonedDateTime, String> getPriorStash(StashIO stashIO) throws Exception {
@@ -217,7 +278,35 @@ public class StashGenerator {
     private JavaRDD<String> getDatabusEventsTablesRDD(JavaSparkContext context, String databusSource,
                                                       ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
 
-        Builder<Object, Seq<Object>> pollDates = Seq$.MODULE$.newBuilder();
+        final Seq<String> pollDates = getPollDates(priorStashTime, stashTime);
+        final SQLContext sqlContext = SQLContext.getOrCreate(context.sc());
+        final Dataset<Row> dataFrame = sqlContext.read().schema(DocumentSchema.SCHEMA).parquet(databusSource);
+
+        return dataFrame.select(dataFrame.col(DocumentSchema.TABLE))
+                .where(dataFrame.col(DocumentSchema.POLL_DATE).isin(pollDates))
+                .distinct()
+                .map(value -> value.getString(0), Encoders.STRING())
+                .toJavaRDD();
+    }
+
+    private JavaPairRDD<DocumentMetadata, String> getDatabusEventsRDD(JavaSparkContext context, String databusSource,
+                                                                      ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
+        final Seq<String> pollDates = getPollDates(priorStashTime, stashTime);
+        final SQLContext sqlContext = SQLContext.getOrCreate(context.sc());
+        final Dataset<Row> dataFrame = sqlContext.read().schema(DocumentSchema.SCHEMA).parquet(databusSource);
+
+        return dataFrame
+                .select(
+                        dataFrame.col(DocumentSchema.TABLE), dataFrame.col(DocumentSchema.KEY),
+                        dataFrame.col(DocumentSchema.VERSION), dataFrame.col(DocumentSchema.LAST_UPDATE_TS),
+                        dataFrame.col(DocumentSchema.DELETED), dataFrame.col(DocumentSchema.JSON))
+                .where(dataFrame.col(DocumentSchema.POLL_DATE).isin(pollDates))
+                .toJavaRDD()
+                .mapToPair(row -> new Tuple2<>(getMetadata(row), getJson(row)));
+    }
+
+    private Seq<String> getPollDates(ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
+        Builder<String, Seq<String>> pollDates = Seq$.MODULE$.newBuilder();
 
         // Poll times work on day boundaries, so move to the start of day
         ZonedDateTime pollDate = priorStashTime.truncatedTo(ChronoUnit.DAYS);
@@ -226,13 +315,6 @@ public class StashGenerator {
             pollDate = pollDate.plusDays(1);
         }
 
-        SQLContext sqlContext = SQLContext.getOrCreate(context.sc());
-        Dataset<Row> dataFrame = sqlContext.read().schema(DocumentSchema.SCHEMA).parquet(databusSource);
-
-        return dataFrame.select(dataFrame.col(DocumentSchema.TABLE))
-                .where(dataFrame.col(DocumentSchema.POLL_DATE).isin(pollDates.result()))
-                .distinct()
-                .map(value -> value.getString(0), Encoders.STRING())
-                .toJavaRDD();
+        return pollDates.result();
     }
 }

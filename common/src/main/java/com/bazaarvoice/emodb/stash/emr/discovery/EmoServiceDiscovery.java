@@ -1,7 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.discovery;
 
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Lists;
 import com.google.common.io.Closeables;
@@ -19,12 +18,11 @@ import java.net.UnknownHostException;
 import java.util.Collections;
 import java.util.List;
 
+import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 public abstract class EmoServiceDiscovery extends AbstractService implements Serializable {
-
-    private final static ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private final String _zookeeperConnectionString;
     private final String _zookeeperNamespace;
@@ -102,8 +100,8 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
         List<ChildData> currentData = _pathCache.getCurrentData();
         List<Host> hosts = Lists.newArrayListWithCapacity(currentData.size());
         for (ChildData childData : currentData) {
-            RegistrationData registrationData = OBJECT_MAPPER.readValue(childData.getData(), RegistrationData.class);
-            PayloadData payloadData = OBJECT_MAPPER.readValue(registrationData.payload, PayloadData.class);
+            RegistrationData registrationData = parseJson(childData.getData(), RegistrationData.class);
+            PayloadData payloadData = parseJson(registrationData.payload, PayloadData.class);
             URI baseUri = UriBuilder.fromUri(payloadData.serviceUrl).replacePath(null).build();
             hosts.add(new Host(registrationData.id, baseUri));
         }

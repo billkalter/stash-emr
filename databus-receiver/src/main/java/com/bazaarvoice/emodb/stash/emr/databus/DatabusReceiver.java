@@ -8,7 +8,6 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.JsonDeserializer;
 import com.fasterxml.jackson.databind.JsonNode;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.google.common.base.Strings;
 import com.google.common.base.Throwables;
@@ -43,13 +42,14 @@ import java.util.concurrent.TimeoutException;
 import java.util.concurrent.locks.Condition;
 import java.util.concurrent.locks.ReentrantLock;
 
+import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
+import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.toJsonString;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> {
 
     private final static Logger _log = LoggerFactory.getLogger(DatabusReceiver.class);
-    private final static ObjectMapper _objectMapper = new ObjectMapper();
 
     private final DatabusDiscovery.Builder _databusDiscoveryBuilder;
     private final String _subscription;
@@ -170,7 +170,7 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
                     }
 
                     InputStream entity = response.readEntity(InputStream.class);
-                    events = _objectMapper.readValue(entity, new TypeReference<List<Event>>() {});
+                    events = parseJson(entity, new TypeReference<List<Event>>() {});
                 } finally {
                     response.close();
                 }
@@ -195,7 +195,7 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
                     response = _client.target(ackUri).request()
                             .accept(MediaType.APPLICATION_JSON_TYPE)
                             .header("X-BV-API-Key", _apiKey)
-                            .post(Entity.json(_objectMapper.writeValueAsString(eventKeys)));
+                            .post(Entity.json(toJsonString(eventKeys)));
 
                     if (response.getStatus() != HttpStatus.SC_OK) {
                         _log.warn("Events ack failed with response: code={}, entity={}", response.getStatus(), response.readEntity(String.class));
@@ -253,7 +253,7 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
         public Event(String eventKey, String content) throws IOException {
             this.eventKey = eventKey;
             this.content = content;
-            this.documentMetadata = _objectMapper.readValue(content, DocumentMetadata.class);
+            this.documentMetadata = parseJson(content, DocumentMetadata.class);
         }
     }
 

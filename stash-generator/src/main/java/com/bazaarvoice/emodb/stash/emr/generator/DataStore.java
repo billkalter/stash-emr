@@ -7,7 +7,6 @@ import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.DeserializationContext;
 import com.fasterxml.jackson.databind.JsonDeserializer;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.annotation.JsonDeserialize;
 import com.google.common.base.Objects;
 import com.google.common.base.Throwables;
@@ -33,10 +32,11 @@ import java.util.List;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 
+import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
+
 public class DataStore implements Serializable, Closeable {
 
     private final static Logger _log = LoggerFactory.getLogger(DataStore.class);
-    private final static ObjectMapper _objectMapper = new ObjectMapper();
     private final static TypeReference<List<TableEntry>> _tableEntriesType = new TypeReference<List<TableEntry>>() {};
     private final DataStoreDiscovery.Builder _dataStoreDiscoveryBuilder;
     private final String _apiKey;
@@ -80,7 +80,7 @@ public class DataStore implements Serializable, Closeable {
                             throw new IOException("Failed to read table names");
                         }
 
-                        List<TableEntry> tableEntries = _objectMapper.readValue(response.readEntity(String.class), _tableEntriesType);
+                        List<TableEntry> tableEntries = parseJson(response.readEntity(String.class), _tableEntriesType);
 
                         if (tableEntries.isEmpty()) {
                             return endOfData();

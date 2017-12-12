@@ -6,7 +6,6 @@ import com.amazonaws.regions.Regions;
 import com.amazonaws.services.s3.AmazonS3;
 import com.amazonaws.services.s3.AmazonS3Client;
 import com.amazonaws.services.s3.model.AmazonS3Exception;
-import com.amazonaws.services.s3.model.CopyObjectRequest;
 import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.ListObjectsRequest;
 import com.amazonaws.services.s3.model.ObjectListing;
@@ -27,6 +26,7 @@ import java.io.InputStreamReader;
 import java.io.Serializable;
 import java.net.URI;
 import java.util.Arrays;
+import java.util.Iterator;
 import java.util.List;
 import java.util.stream.Collectors;
 
@@ -56,6 +56,8 @@ abstract public class StashIO implements Serializable {
     abstract public String getLatest() throws IOException;
 
     abstract public List<String> getTableFilesFromStash(String stashDir, String table);
+
+    abstract public Iterator<String> readStashTableFile(String stashDir, String table, String file);
 
     abstract public void copyTableFile(String fromStashDir, String toStashDir, String table, String file);
 
@@ -142,6 +144,12 @@ abstract public class StashIO implements Serializable {
 
             s3().copyObject(_bucket, fromFile, _bucket, toFile);
         }
+
+        @Override
+        public Iterator<String> readStashTableFile(String stashDir, String table, String file) {
+            // TODO:  Implement this
+            return null;
+        }
     }
 
     private static class LocalFileStashIO extends StashIO {
@@ -186,6 +194,12 @@ abstract public class StashIO implements Serializable {
                     throw Throwables.propagate(e);
                 }
             }
+        }
+
+        @Override
+        public Iterator<String> readStashTableFile(String stashDir, String table, String file) {
+            // TODO:  Implement this
+            return null;
         }
     }
 }

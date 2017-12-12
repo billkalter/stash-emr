@@ -43,7 +43,7 @@ public class DocumentSchema {
                 metadata.getDocumentVersion().getVersion(),
                 metadata.getDocumentVersion().getLastUpdateTs(),
                 metadata.isDeleted(),
-                json,
+                metadata.isDeleted() ? null : json,
                 toPollTime(pollTime)
         });
     }
