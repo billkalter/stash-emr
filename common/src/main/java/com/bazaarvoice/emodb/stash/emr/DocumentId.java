@@ -52,4 +52,9 @@ public class DocumentId implements Serializable, Comparable<DocumentId> {
                 .compare(_key, o._key)
                 .result();
     }
+
+    @Override
+    public String toString() {
+        return String.format("%s/%s", _table, _key);
+    }
 }

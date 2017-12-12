@@ -1,8 +1,8 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
+import com.bazaarvoice.emodb.stash.emr.DocumentId;
 import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.Maps;
-import org.apache.spark.HashPartitioner;
 import org.apache.spark.Partitioner;
 
 import java.io.Serializable;
@@ -36,9 +36,9 @@ public class DocumentPartitioner extends Partitioner {
 
     @Override
     public int getPartition(Object o) {
-        String key = (String) o;
-        TablePartition tablePartition = _tablePartitions.get(key);
-        return tablePartition.partitionOffset + Math.abs(key.hashCode()) % tablePartition.numPartitions;
+        DocumentId documentId = (DocumentId) o; 
+        TablePartition tablePartition = _tablePartitions.get(documentId.getTable());
+        return tablePartition.partitionOffset + Math.abs(documentId.getKey().hashCode()) % tablePartition.numPartitions;
     }
 
     private static final class TablePartition implements Serializable {

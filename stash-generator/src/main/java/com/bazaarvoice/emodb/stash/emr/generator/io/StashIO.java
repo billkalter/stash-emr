@@ -13,15 +13,22 @@ import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.google.common.base.Charsets;
 import com.google.common.base.Throwables;
+import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import com.google.common.io.Closeables;
 import com.google.common.io.Files;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.apache.spark.api.java.Optional;
 
 import javax.ws.rs.core.Response;
 import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileNotFoundException;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.Serializable;
 import java.net.URI;
@@ -60,6 +67,52 @@ abstract public class StashIO implements Serializable {
     abstract public Iterator<String> readStashTableFile(String stashDir, String table, String file);
 
     abstract public void copyTableFile(String fromStashDir, String toStashDir, String table, String file);
+
+    protected Iterator<String> readJsonLines(InputStream inputStream, String fileName) {
+        try {
+            if (fileName.endsWith(".gz")) {
+                inputStream = new GzipCompressorInputStream(inputStream, true);
+            }
+        } catch (IOException e) {
+            throw Throwables.propagate(e);
+        }
+
+        final BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(inputStream, Charsets.UTF_8));
+
+        return new AbstractIterator<String>() {
+            @Override
+            protected String computeNext() {
+                try {
+                    while (true) {
+                        String line = bufferedReader.readLine();
+                        if (line == null) {
+                            closeReader();
+                            return endOfData();
+                        }
+                        if (!line.isEmpty()) {
+                            return line;
+                        }
+                    }
+                } catch (IOException e) {
+                    closeReader();
+                    throw Throwables.propagate(e);
+                }
+            }
+
+            @Override
+            protected void finalize() throws Throwable {
+                closeReader();
+            }
+
+            private void closeReader() {
+                try {
+                    Closeables.close(bufferedReader, true);
+                } catch (IOException ignore) {
+                    // Already logged
+                }
+            }
+        };
+    }
 
     private static class S3StashIO extends StashIO {
         private final String _bucket;
@@ -147,8 +200,18 @@ abstract public class StashIO implements Serializable {
 
         @Override
         public Iterator<String> readStashTableFile(String stashDir, String table, String file) {
-            // TODO:  Implement this
-            return null;
+            String encodedTable = encodeStashTable(table);
+            String s3File = String.format("%s/%s/%s/%s", _rootPath, stashDir, encodedTable, file);
+
+            try {
+                S3Object s3Object = s3().getObject(_bucket, s3File);
+                return readJsonLines(s3Object.getObjectContent(), file);
+            } catch (AmazonS3Exception e) {
+                if (e.getStatusCode() == Response.Status.NOT_FOUND.getStatusCode()) {
+                    return Iterators.emptyIterator();
+                }
+                throw e;
+            }
         }
     }
 
@@ -198,8 +261,15 @@ abstract public class StashIO implements Serializable {
 
         @Override
         public Iterator<String> readStashTableFile(String stashDir, String table, String file) {
-            // TODO:  Implement this
-            return null;
+            String encodedTable = encodeStashTable(table);
+            File stashRootDir = new File(_rootDir, stashDir);
+            File fromFile = new File(new File(stashRootDir, encodedTable), file);
+
+            try {
+                return readJsonLines(new FileInputStream(fromFile), file);
+            } catch (FileNotFoundException e) {
+                return Iterators.emptyIterator();
+            }
         }
     }
 }
