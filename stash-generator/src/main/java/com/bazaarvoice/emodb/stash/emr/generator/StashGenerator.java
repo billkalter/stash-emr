@@ -61,7 +61,7 @@ public class StashGenerator {
                 .help("Location where databus updates were written");
         argParser.addArgument("--stashRoot")
                 .required(true)
-                .help("Root Stash directory");
+                .help("Root Stash directory (ex: s3://emodb-us-east-1/stash/ci)");
         argParser.addArgument("--stashDate")
                 .required(true)
                 .help("Date for the Stash being generated");
@@ -73,6 +73,8 @@ public class StashGenerator {
                 .help("EmoDB URL (if using direct EmoDB access)");
         argParser.addArgument("--master")
                 .help("Spark master URL");
+        argParser.addArgument("--region")
+                .help("Region where S3 bucket is located if 'stashRoot' is in S3. (default is EC2 host's region)");
         argParser.addArgument("--existingTablesFile")
                 .help("Location of a file which contains a list of existing Emo tables, one per line. " +
                       "Useful for local testing without an EmoDB service to query for the list.");
@@ -87,6 +89,7 @@ public class StashGenerator {
                 .ofEpochMilli(ISO8601Utils.parse(ns.getString("stashDate"), new ParsePosition(0)).getTime())
                 .atZone(ZoneOffset.UTC);
         String master = ns.getString("master");
+        String region = ns.getString("region");
         String existingTablesFile = ns.getString("existingTablesFile");
 
         String zkConnectionString = ns.getString("zkConnectionString");
@@ -107,11 +110,13 @@ public class StashGenerator {
         DataStore dataStore = new DataStore(dataStoreDiscoveryBuilder, apiKey);
 
         new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, stashDate, master,
+                Optional.fromNullable(region),
                 Optional.fromNullable(existingTablesFile));
     }
 
     public void runStashGenerator(final DataStore dataStore, final String databusSource, final URI stashRoot,
                                   final ZonedDateTime stashTime, @Nullable final String master,
+                                  Optional<String> region,
                                   Optional<String> existingTablesFile) throws Exception {
 
         SparkConf sparkConf = new SparkConf().setAppName("StashGenerator");
@@ -120,17 +125,15 @@ public class StashGenerator {
         }
 
         JavaSparkContext context = new JavaSparkContext(sparkConf);
-        StashIO stashIO = StashIO.forStashAt(stashRoot);
+        StashIO stashIO = StashIO.forStashAt(stashRoot, region);
 
-        Tuple2<ZonedDateTime, URI> priorStash = getPriorStash(stashIO, stashRoot);
+        Tuple2<ZonedDateTime, String> priorStash = getPriorStash(stashIO);
         ZonedDateTime priorStashTime = priorStash._1;
-        URI priorStashDir = priorStash._2;
-        URI currentStashDir = UriBuilder.fromUri(stashRoot)
-                .path(STASH_DIR_FORMAT.format(stashTime))
-                .build();
+        String priorStashDir = priorStash._2;
+        String newStashDir = STASH_DIR_FORMAT.format(stashTime);
 
         checkArgument(priorStashTime.isBefore(stashTime), "Cannot create Stash older than existing latest Stash");
-        _log.info("Creating Stash to {} merging with previous stash at {}", currentStashDir, priorStashDir);
+        _log.info("Creating Stash to {} merging with previous stash at {}", newStashDir, priorStashDir);
         
         // Get all tables that exist in Stash
         JavaPairRDD<String, Short> emoTables = getEmoTableNamesRDD(context, dataStore, existingTablesFile)
@@ -166,21 +169,28 @@ public class StashGenerator {
                     Joiner.on(",").join(tables));
         });
 
-        // TODO:  The following is just dumping data.  More should follow
+        copyExistingStashTables(unmodifiedTables, stashIO, priorStashDir, newStashDir);
 
-        unmodifiedTables.foreach(table -> _log.info("UNMODIFIED TABLE: {}", table));
+        // TODO:  Implement merge algorithm
         mergeTables.foreach(table -> _log.info("MERGE TABLE: {}", table));
     }
 
-    private Tuple2<ZonedDateTime, URI> getPriorStash(StashIO stashIO, URI stashRoot) throws Exception {
+    private void copyExistingStashTables(final JavaRDD<String> tables,
+                                         final StashIO stashIO, final String priorStashDir, final String newStashDir) {
+        JavaPairRDD<String, String> tableFiles = tables.flatMapToPair(table ->
+                stashIO.getTableFilesFromStash(priorStashDir, table)
+                        .stream()
+                        .map(file -> new Tuple2<>(table, file))
+                        .iterator());
+
+        tableFiles.foreachAsync(t -> stashIO.copyTableFile(priorStashDir, newStashDir, t._1, t._2));
+    }
+
+    private Tuple2<ZonedDateTime, String> getPriorStash(StashIO stashIO) throws Exception {
        String latestFileDir = stashIO.getLatest();
-
         _log.info("Latest Stash found prior to the one being generated is {}", latestFileDir);
-        
         ZonedDateTime priorStashDate = STASH_DIR_FORMAT.parse(latestFileDir, ZonedDateTime::from);
-        URI priorStashUri = UriBuilder.fromUri(stashRoot).path(latestFileDir).build();
-
-        return new Tuple2<>(priorStashDate, priorStashUri);
+        return new Tuple2<>(priorStashDate, latestFileDir);
     }
 
     private JavaRDD<String> getEmoTableNamesRDD(JavaSparkContext context, DataStore dataStore, Optional<String> existingTablesFile) {
