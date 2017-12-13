@@ -44,6 +44,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.stream.Collectors;
 
+import static com.amazonaws.services.s3.internal.Constants.MB;
 import static com.bazaarvoice.emodb.stash.emr.generator.StashUtil.encodeStashTable;
 
 abstract public class StashIO implements Serializable, StashReader, StashWriter {
@@ -247,19 +248,14 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
             String encodedTable = encodeStashTable(table);
             String s3File = String.format("%s/%s/%s-%s.gz", _stashPath, encodedTable, encodedTable, suffix);
 
-//            ByteArrayOutputStream out = new ByteArrayOutputStream(5 * MB);
-//            try {
-//                s3().uploadPart(new UploadPartRequest().)
-//                new TransferManager(s3()).upload(new PutObjectRequest().)
-//                S3Object s3Object = s3().getObject(_bucket, s3File);
-//                return readJsonLines(s3Object.getObjectContent(), file);
-//            } catch (AmazonS3Exception e) {
-//                if (e.getStatusCode() == Response.Status.NOT_FOUND.getStatusCode()) {
-//                    return Iterators.emptyIterator();
-//                }
-//                throw e;
-//            }
-            // TODO:  Code this
+            // TODO:  Maybe use a pool of byte arrays?
+            byte[] buffer = new byte[10 * MB];
+            S3OutputStream out = new S3OutputStream(s3(), _bucket, s3File, buffer);
+            try {
+                writeJsonLines(out, jsonLines);
+            } catch (IOException e) {
+                throw Throwables.propagate(e);
+            }
         }
 
         @Override
