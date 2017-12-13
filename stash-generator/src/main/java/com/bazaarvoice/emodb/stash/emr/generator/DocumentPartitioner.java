@@ -9,7 +9,7 @@ import java.util.Map;
 
 public class DocumentPartitioner extends Partitioner {
 
-    public final static int DEFAULT_PARTITION_SIZE = 10000;
+    public final static int DEFAULT_PARTITION_SIZE = 25000;
 
     private final Map<String, TablePartition> _tablePartitions;
     private final int _numPartitions;

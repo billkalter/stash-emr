@@ -141,7 +141,7 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
 
     private static class S3StashIO extends StashIO {
 
-        private static final BufferPool BUFFER_POOL = new BufferPool(12, 10 * MB);
+        private static final BufferPool BUFFER_POOL = new BufferPool(16, 10 * MB);
         
         private final String _bucket;
         private final String _stashPath;
