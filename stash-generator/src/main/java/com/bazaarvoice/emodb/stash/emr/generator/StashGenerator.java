@@ -14,6 +14,7 @@ import com.google.common.collect.Lists;
 import com.google.common.collect.PeekingIterator;
 import com.google.common.hash.Hashing;
 import net.sourceforge.argparse4j.ArgumentParsers;
+import net.sourceforge.argparse4j.impl.action.StoreTrueArgumentAction;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
 import org.apache.spark.SparkConf;
@@ -76,7 +77,7 @@ public class StashGenerator {
                 .required(true)
                 .help("Root Stash directory (ex: s3://emodb-us-east-1/stash/ci)");
         argParser.addArgument("--outputStashRoot")
-                .help("Root Stash directory for writing, useful for testing (default is stashRoot value))");
+                .help("Root Stash directory for writing.  Useful for testing (default is stashRoot value))");
         argParser.addArgument("--stashDate")
                 .required(true)
                 .help("Date for the Stash being generated");
@@ -93,6 +94,9 @@ public class StashGenerator {
         argParser.addArgument("--existingTablesFile")
                 .help("Location of a file which contains a list of existing Emo tables, one per line. " +
                       "Useful for local testing without an EmoDB service to query for the list.");
+        argParser.addArgument("--noOptimizeUnmodifiedTables")
+                .action(new StoreTrueArgumentAction())
+                .help("Disable optimization for copying unmodified tables.  Useful for local testing.");
 
         Namespace ns = argParser.parseArgs(args);
 
@@ -107,7 +111,8 @@ public class StashGenerator {
         String master = ns.getString("master");
         String region = ns.getString("region");
         String existingTablesFile = ns.getString("existingTablesFile");
-
+        boolean optimizeUnmodifiedTables = !ns.getBoolean("noOptimizeUnmodifiedTables");
+        
         String zkConnectionString = ns.getString("zkConnectionString");
         String zkNamespace = ns.getString("zkNamespace");
         String emoUrlString = ns.getString("emoUrl");
@@ -126,15 +131,15 @@ public class StashGenerator {
         DataStore dataStore = new DataStore(dataStoreDiscoveryBuilder, apiKey);
 
         new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, outputStashRoot, stashDate, master,
-                Optional.fromNullable(region),
-                Optional.fromNullable(existingTablesFile));
+                Optional.fromNullable(region), Optional.fromNullable(existingTablesFile), optimizeUnmodifiedTables);
     }
 
     public void runStashGenerator(final DataStore dataStore, final String databusSource, final URI stashRoot,
                                   final URI outputStashRoot,
                                   final ZonedDateTime stashTime, @Nullable final String master,
                                   Optional<String> region,
-                                  Optional<String> existingTablesFile) throws Exception {
+                                  Optional<String> existingTablesFile,
+                                  boolean optimizeUnmodifiedTables) throws Exception {
 
         SparkConf sparkConf = new SparkConf().setAppName("StashGenerator");
         if (master != null) {
@@ -167,13 +172,23 @@ public class StashGenerator {
                 .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
         // For those tables which exist and have no updates they can be copied as-is
-        JavaRDD<String> unmodifiedTables = allTables
-                .filter(t -> TableStatus.existsInEmo(t._2) && !TableStatus.containsUpdates(t._2))
-                .map(t -> t._1);
+        final JavaRDD<String> unmodifiedTables;
+        final JavaRDD<String> mergeTables;
 
-        JavaRDD<String> mergeTables = allTables
-                .filter(t -> TableStatus.existsInEmo(t._2) && TableStatus.containsUpdates(t._2))
-                .map(t -> t._1);
+        if (optimizeUnmodifiedTables) {
+            unmodifiedTables = allTables
+                    .filter(t -> TableStatus.existsInEmo(t._2) && !TableStatus.containsUpdates(t._2))
+                    .map(t -> t._1);
+
+            mergeTables = allTables
+                    .filter(t -> TableStatus.existsInEmo(t._2) && TableStatus.containsUpdates(t._2))
+                    .map(t -> t._1);
+        } else {
+            unmodifiedTables = context.emptyRDD();
+            mergeTables = allTables
+                    .filter(t -> TableStatus.existsInEmo(t._2))
+                    .map(t -> t._1);
+        }
 
         JavaRDD<String> droppedTables = allTables
                 .filter(t-> !TableStatus.existsInEmo(t._2))
