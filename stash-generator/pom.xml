@@ -29,21 +29,22 @@
             <groupId>com.amazonaws</groupId>
             <artifactId>aws-java-sdk-s3</artifactId>
         </dependency>
+        <dependency>
+            <groupId>com.google.guava</groupId>
+            <artifactId>guava</artifactId>
+        </dependency>
 
         <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-core_2.11</artifactId>
-            <!-- <scope>provided</scope> -->
         </dependency>
         <dependency>
             <groupId>org.apache.spark</groupId>
             <artifactId>spark-streaming_2.11</artifactId>
-            <!-- <scope>provided</scope> -->
         </dependency>
         <dependency>
             <groupId>org.apache.spark</groupId>   
             <artifactId>spark-sql_2.11</artifactId>
-            <!-- <scope>provided</scope> -->
         </dependency>
     </dependencies>
 

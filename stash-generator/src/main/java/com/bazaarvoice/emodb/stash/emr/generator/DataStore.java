@@ -12,6 +12,8 @@ import com.google.common.base.Objects;
 import com.google.common.base.Throwables;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Iterators;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.Service;
 import org.apache.http.HttpStatus;
 import org.glassfish.jersey.client.ClientConfig;
 import org.glassfish.jersey.client.ClientProperties;
@@ -114,14 +116,17 @@ public class DataStore implements Serializable, Closeable {
                 if (dataStoreDiscovery == null) {
                     dataStoreDiscovery = _dataStoreDiscoveryBuilder.build();
                     _dataStoreDiscovery = dataStoreDiscovery;
-                    _dataStoreDiscovery.startAsync();
+                    ListenableFuture<Service.State> future = _dataStoreDiscovery.start();
 
                     try {
-                        _dataStoreDiscovery.awaitRunning(30, TimeUnit.SECONDS);
+                        future.get(30, TimeUnit.SECONDS);
                     } catch (TimeoutException e) {
                         _log.error("DataStore discovery did not start in a reasonable time");
                         throw Throwables.propagate(e);
+                    } catch (Exception e) {
+                        _log.error("DataStore discovery startup failed", e);
                     }
+
                     _client = JerseyClientBuilder.createClient(new ClientConfig()
                             .property(ClientProperties.CONNECT_TIMEOUT, (int) Duration.ofSeconds(5).toMillis())
                             .property(ClientProperties.READ_TIMEOUT, (int) Duration.ofSeconds(10).toMillis()));
@@ -134,7 +139,7 @@ public class DataStore implements Serializable, Closeable {
     @Override
     synchronized public void close() throws IOException {
         if (_dataStoreDiscovery != null) {
-            _dataStoreDiscovery.stopAsync();
+            _dataStoreDiscovery.stop();
             _dataStoreDiscovery = null;
         }
         if (_client != null) {

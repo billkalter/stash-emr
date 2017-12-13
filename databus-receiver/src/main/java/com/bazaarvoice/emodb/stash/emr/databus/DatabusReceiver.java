@@ -13,6 +13,8 @@ import com.google.common.base.Strings;
 import com.google.common.base.Throwables;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import com.google.common.util.concurrent.ListenableFuture;
+import com.google.common.util.concurrent.Service;
 import org.apache.http.HttpStatus;
 import org.apache.spark.storage.StorageLevel;
 import org.apache.spark.streaming.receiver.Receiver;
@@ -116,11 +118,14 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
     
     private void startDatabus() {
         _databusDiscovery = _databusDiscoveryBuilder.withSubscription(_subscription).build();
-        _databusDiscovery.startAsync();
+        ListenableFuture<Service.State> future = _databusDiscovery.start();
         try {
-            _databusDiscovery.awaitRunning(30, TimeUnit.SECONDS);
+            future.get(30, TimeUnit.SECONDS);
         } catch (TimeoutException e) {
             _log.error("Databus discovery did not start in a reasonable time");
+            throw Throwables.propagate(e);
+        } catch (Exception e) {
+            _log.error("Databus discovery startup failed", e);
             throw Throwables.propagate(e);
         }
 
@@ -130,7 +135,7 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
     }
 
     private void stopDatabus() {
-        _databusDiscovery.stopAsync();
+        _databusDiscovery.stop();
         _databusDiscovery = null;
         _client.close();
         _client = null;

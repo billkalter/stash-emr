@@ -20,7 +20,7 @@ public class PartitionedDiscovery extends EmoServiceDiscovery {
                                 URI directUri) {
         super(zookeeperConnectionString, zookeeperNamespace, service, directUri);
         Hasher hasher = Hashing.md5().newHasher();
-        hasher.putUnencodedChars(partitionKey);
+        putUnencodedChars(hasher, partitionKey);
         _partitionHash =  hasher.hash().asInt();
         _partitionedUri = directUri;
     }
@@ -54,12 +54,19 @@ public class PartitionedDiscovery extends EmoServiceDiscovery {
         for (int i = 0; list.size() < 100; i++) {
             Hasher hasher = Hashing.md5().newHasher();
             hasher.putInt(i);
-            hasher.putUnencodedChars(id);
+            putUnencodedChars(hasher, id);
             ByteBuffer buf = ByteBuffer.wrap(hasher.hash().asBytes());
             while (buf.hasRemaining() && list.size() < 100) {
                 list.add(buf.getInt());
             }
         }
         return list;
+    }
+
+    private void putUnencodedChars(Hasher hasher, String str) {
+        int len = str.length();
+        for (int i=0; i < len; i++) {
+            hasher.putChar(str.charAt(i));
+        }
     }
 }
