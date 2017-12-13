@@ -1,7 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
 import com.bazaarvoice.emodb.stash.emr.DocumentId;
-import com.google.common.collect.ImmutableSortedMap;
 import com.google.common.collect.Maps;
 import org.apache.spark.Partitioner;
 
@@ -10,18 +9,21 @@ import java.util.Map;
 
 public class DocumentPartitioner extends Partitioner {
 
-    private final static long TARGET_DOCS_PER_PARTITION = 10000;
+    private final static long TARGET_PARTITION_SIZE = 1000;
 
     private final Map<String, TablePartition> _tablePartitions;
     private final int _numPartitions;
 
     public DocumentPartitioner(Map<String, Long> docCountsByTable) {
-        Map<String, Long> sortedCounts = ImmutableSortedMap.copyOf(docCountsByTable);
+        this(docCountsByTable, TARGET_PARTITION_SIZE);
+    }
+
+    public DocumentPartitioner(Map<String, Long> docCountsByTable, long targetPartitionSize) {
         int partitionOffset = 0;
 
         _tablePartitions = Maps.newHashMap();
-        for (Map.Entry<String, Long> entry : sortedCounts.entrySet()) {
-            int numPartitions = (int) Math.ceil(entry.getValue().doubleValue() / TARGET_DOCS_PER_PARTITION);
+        for (Map.Entry<String, Long> entry : docCountsByTable.entrySet()) {
+            int numPartitions = (int) Math.ceil(entry.getValue().doubleValue() / targetPartitionSize);
             _tablePartitions.put(entry.getKey(), new TablePartition(partitionOffset, numPartitions));
             partitionOffset += numPartitions;
         }

@@ -3,11 +3,16 @@ package com.bazaarvoice.emodb.stash.emr.generator;
 import com.bazaarvoice.emodb.stash.emr.DocumentId;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashIO;
+import com.bazaarvoice.emodb.stash.emr.generator.io.StashReader;
+import com.bazaarvoice.emodb.stash.emr.generator.io.StashWriter;
 import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
 import com.fasterxml.jackson.databind.util.ISO8601Utils;
+import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
+import com.google.common.collect.PeekingIterator;
+import com.google.common.hash.Hashing;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
@@ -38,6 +43,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
@@ -69,6 +75,8 @@ public class StashGenerator {
         argParser.addArgument("--stashRoot")
                 .required(true)
                 .help("Root Stash directory (ex: s3://emodb-us-east-1/stash/ci)");
+        argParser.addArgument("--outputStashRoot")
+                .help("Root Stash directory for writing, useful for testing (default is stashRoot value))");
         argParser.addArgument("--stashDate")
                 .required(true)
                 .help("Date for the Stash being generated");
@@ -92,6 +100,7 @@ public class StashGenerator {
         String apiKey = ns.getString("apikey");
         String databusSource = ns.getString("databusSource");
         URI stashRoot = URI.create(ns.getString("stashRoot"));
+        URI outputStashRoot = URI.create(Optional.ofNullable(ns.getString("outputStashRoot")).or(ns.getString("stashRoot")));
         ZonedDateTime stashDate = Instant
                 .ofEpochMilli(ISO8601Utils.parse(ns.getString("stashDate"), new ParsePosition(0)).getTime())
                 .atZone(ZoneOffset.UTC);
@@ -116,12 +125,13 @@ public class StashGenerator {
 
         DataStore dataStore = new DataStore(dataStoreDiscoveryBuilder, apiKey);
 
-        new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, stashDate, master,
+        new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, outputStashRoot, stashDate, master,
                 Optional.fromNullable(region),
                 Optional.fromNullable(existingTablesFile));
     }
 
     public void runStashGenerator(final DataStore dataStore, final String databusSource, final URI stashRoot,
+                                  final URI outputStashRoot,
                                   final ZonedDateTime stashTime, @Nullable final String master,
                                   Optional<String> region,
                                   Optional<String> existingTablesFile) throws Exception {
@@ -132,15 +142,14 @@ public class StashGenerator {
         }
 
         JavaSparkContext context = new JavaSparkContext(sparkConf);
-        StashIO stashIO = StashIO.forStashAt(stashRoot, region);
+        StashReader priorStash = StashIO.getLatestStash(stashRoot, region);
+        ZonedDateTime priorStashTime = STASH_DIR_FORMAT.parse(priorStash.getStashDirectory(), ZonedDateTime::from);
 
-        Tuple2<ZonedDateTime, String> priorStash = getPriorStash(stashIO);
-        ZonedDateTime priorStashTime = priorStash._1;
-        String priorStashDir = priorStash._2;
         String newStashDir = STASH_DIR_FORMAT.format(stashTime);
+        StashWriter newStash = StashIO.createStash(outputStashRoot, newStashDir, region);
 
         checkArgument(priorStashTime.isBefore(stashTime), "Cannot create Stash older than existing latest Stash");
-        _log.info("Creating Stash to {} merging with previous stash at {}", newStashDir, priorStashDir);
+        _log.info("Creating Stash to {} merging with previous stash at {}", newStashDir, priorStash.getStashDirectory());
         
         // Get all tables that exist in Stash
         JavaPairRDD<String, Short> emoTables = getEmoTableNamesRDD(context, dataStore, existingTablesFile)
@@ -178,41 +187,41 @@ public class StashGenerator {
 
         List<JavaFutureAction<Void>> futures = Lists.newArrayListWithCapacity(2);
 
-        futures.add(copyExistingStashTables(unmodifiedTables, stashIO, priorStashDir, newStashDir));
+        futures.add(copyExistingStashTables(unmodifiedTables, priorStash, newStash));
 
-        futures.add(copyAndMergeUpdatedStashTables(context, mergeTables, databusSource, stashIO, priorStashDir, newStashDir, priorStashTime, stashTime));
+        futures.add(copyAndMergeUpdatedStashTables(context, mergeTables, databusSource, priorStash, newStash, priorStashTime, stashTime));
 
         for (JavaFutureAction<Void> future : futures) {
             future.get();
         }
     }
 
-    private JavaFutureAction<Void> copyExistingStashTables(final JavaRDD<String> tables,
-                                         final StashIO stashIO, final String priorStashDir, final String newStashDir) {
+    private JavaFutureAction<Void> copyExistingStashTables(final JavaRDD<String> tables, final StashReader priorStash,
+                                                           final StashWriter newStash) {
         JavaPairRDD<String, String> tableFiles = tables.flatMapToPair(table ->
-                stashIO.getTableFilesFromStash(priorStashDir, table)
+                priorStash.getTableFilesFromStash(table)
                         .stream()
                         .map(file -> new Tuple2<>(table, file))
                         .iterator());
 
-        return tableFiles.foreachAsync(t -> stashIO.copyTableFile(priorStashDir, newStashDir, t._1, t._2));
+        return tableFiles.foreachAsync(t -> priorStash.copyTableFile(newStash, t._1, t._2));
     }
 
     private JavaFutureAction<Void> copyAndMergeUpdatedStashTables(final JavaSparkContext context, final JavaRDD<String> tables,
                                                                   final String databusSource,
-                                                                  final StashIO stashIO, final String priorStashDir, final String newStashDir,
+                                                                  final StashReader priorStash, final StashWriter newStash,
                                                                   final ZonedDateTime priorStashTime, final ZonedDateTime stashTime) {
 
         // Get all documents from the updated tables
 
         JavaPairRDD<String, String> existingTableFiles = tables.flatMapToPair(table ->
-                stashIO.getTableFilesFromStash(priorStashDir, table)
+                priorStash.getTableFilesFromStash(table)
                         .stream()
                         .map(file -> new Tuple2<>(table, file))
                         .iterator());
 
         JavaPairRDD<DocumentMetadata, String> priorStashDocs = existingTableFiles
-                .flatMap(t -> stashIO.readStashTableFile(priorStashDir, t._1, t._2))
+                .flatMap(t -> priorStash.readStashTableFile(t._1, t._2))
                 .mapToPair(json -> new Tuple2<>(parseJson(json, DocumentMetadata.class), json));
 
 
@@ -246,15 +255,15 @@ public class StashGenerator {
                         .partitionBy(new DocumentPartitioner(docCountsbyTable));
 
         return finalDocsByTable.foreachPartitionAsync(t -> {
-            _log.info("BJK: Partition contains: {}", Joiner.on(",").join(Iterators.transform(t, Tuple2::_1)));
+            // All documents per partition will be for the same table, so peek it from the first entry
+            PeekingIterator<Tuple2<DocumentId, String>> docs = Iterators.peekingIterator(t);
+            if (docs.hasNext()) {
+                String table = docs.peek()._1.getTable();
+                String suffix = Hashing.md5().hashString(docs.peek()._1.getKey(), Charsets.UTF_8).toString();
+                Iterator<String> jsonLines = Iterators.transform(docs, Tuple2::_2);
+                newStash.writeStashTableFile(table, suffix, jsonLines);
+            }
         });
-    }
-
-    private Tuple2<ZonedDateTime, String> getPriorStash(StashIO stashIO) throws Exception {
-       String latestFileDir = stashIO.getLatest();
-        _log.info("Latest Stash found prior to the one being generated is {}", latestFileDir);
-        ZonedDateTime priorStashDate = STASH_DIR_FORMAT.parse(latestFileDir, ZonedDateTime::from);
-        return new Tuple2<>(priorStashDate, latestFileDir);
     }
 
     private JavaRDD<String> getEmoTableNamesRDD(JavaSparkContext context, DataStore dataStore, Optional<String> existingTablesFile) {

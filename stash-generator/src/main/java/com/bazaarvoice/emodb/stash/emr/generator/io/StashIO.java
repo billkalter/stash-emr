@@ -20,16 +20,23 @@ import com.google.common.collect.Lists;
 import com.google.common.io.Closeables;
 import com.google.common.io.Files;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.apache.spark.api.java.Optional;
 
+import javax.annotation.Nullable;
 import javax.ws.rs.core.Response;
+import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
+import java.io.BufferedWriter;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
+import java.io.FileOutputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.io.OutputStreamWriter;
 import java.io.Serializable;
 import java.net.URI;
 import java.util.Arrays;
@@ -39,13 +46,23 @@ import java.util.stream.Collectors;
 
 import static com.bazaarvoice.emodb.stash.emr.generator.StashUtil.encodeStashTable;
 
-abstract public class StashIO implements Serializable {
+abstract public class StashIO implements Serializable, StashReader, StashWriter {
 
-    public static StashIO forStashAt(URI stashRoot, Optional<String> region) {
+    public static StashReader getLatestStash(URI stashRoot, Optional<String> region) {
         if ("s3".equals(stashRoot.getScheme())) {
-            return new S3StashIO(stashRoot, getRegionFrom(region));
+            return new S3StashIO(stashRoot, null, getRegionFrom(region));
         } else if ("file".equals(stashRoot.getScheme())) {
-            return new LocalFileStashIO(stashRoot);
+            return new LocalFileStashIO(stashRoot, null);
+        }
+
+        throw new IllegalArgumentException("Unsupported stash root: " + stashRoot);
+    }
+
+    public static StashWriter createStash(URI stashRoot, String stashDir, Optional<String> region) {
+        if ("s3".equals(stashRoot.getScheme())) {
+            return new S3StashIO(stashRoot, stashDir, getRegionFrom(region));
+        } else if ("file".equals(stashRoot.getScheme())) {
+            return new LocalFileStashIO(stashRoot, stashDir);
         }
 
         throw new IllegalArgumentException("Unsupported stash root: " + stashRoot);
@@ -60,13 +77,7 @@ abstract public class StashIO implements Serializable {
         return region.isPresent() ? region.get() : Regions.getCurrentRegion().getName();
     }
 
-    abstract public String getLatest() throws IOException;
-
-    abstract public List<String> getTableFilesFromStash(String stashDir, String table);
-
-    abstract public Iterator<String> readStashTableFile(String stashDir, String table, String file);
-
-    abstract public void copyTableFile(String fromStashDir, String toStashDir, String table, String file);
+    abstract public void writeStashTableFile(String table, String suffix, Iterator<String> jsonLines);
 
     protected Iterator<String> readJsonLines(InputStream inputStream, String fileName) {
         try {
@@ -114,14 +125,24 @@ abstract public class StashIO implements Serializable {
         };
     }
 
+    protected void writeJsonLines(OutputStream out, Iterator<String> jsonLines) throws IOException {
+        try (OutputStream gzipOut = new GzipCompressorOutputStream(new BufferedOutputStream(out));
+             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(gzipOut))) {
+            while (jsonLines.hasNext()) {
+                writer.write(jsonLines.next());
+                writer.newLine();
+            }
+        }
+    }
+
     private static class S3StashIO extends StashIO {
         private final String _bucket;
-        private final String _rootPath;
+        private final String _stashPath;
         private final String _region;
 
         private volatile AmazonS3 _s3;
 
-        S3StashIO(URI uri, String region) {
+        S3StashIO(URI uri, @Nullable String stashDir, String region) {
             _bucket = uri.getHost();
             String rootPath = uri.getPath();
             if (rootPath.startsWith("/")) {
@@ -130,7 +151,10 @@ abstract public class StashIO implements Serializable {
             if (rootPath.endsWith("/")) {
                 rootPath = rootPath.substring(0, rootPath.length()-1);
             }
-            _rootPath = rootPath;
+            if (stashDir == null) {
+                stashDir = getLatest(_bucket, rootPath);
+            }
+            _stashPath = String.format("%s/%s", rootPath, stashDir);
             _region = region;
         }
 
@@ -143,15 +167,14 @@ abstract public class StashIO implements Serializable {
             return _s3;
         }
 
-        @Override
-        public String getLatest() throws IOException {
+        private String getLatest(String bucket, String rootPath) {
             S3Object s3Object;
             try {
-                String latestPath = String.format("%s/_LATEST", _rootPath);
-                s3Object = s3().getObject(new GetObjectRequest(_bucket, latestPath).withRange(0, 2048));
+                String latestPath = String.format("%s/_LATEST", rootPath);
+                s3Object = s3().getObject(new GetObjectRequest(bucket, latestPath).withRange(0, 2048));
             } catch (AmazonS3Exception e) {
                 if (e.getStatusCode() == Response.Status.NOT_FOUND.getStatusCode()) {
-                    throw new IOException("No previous stash available");
+                    throw new IllegalStateException("No previous stash available");
                 }
                 throw e;
             }
@@ -164,8 +187,8 @@ abstract public class StashIO implements Serializable {
         }
 
         @Override
-        public List<String> getTableFilesFromStash(String stashDir, String table) {
-            String tablePath = String.format("%s/%s/%s/", _rootPath, stashDir, encodeStashTable(table));
+        public List<String> getTableFilesFromStash(String table) {
+            String tablePath = String.format("%s/%s/", _stashPath, encodeStashTable(table));
 
             List<String> tableFiles = Lists.newArrayListWithCapacity(8);
 
@@ -190,18 +213,23 @@ abstract public class StashIO implements Serializable {
         }
 
         @Override
-        public void copyTableFile(String fromStashDir, String toStashDir, String table, String file) {
-            String encodedTable = encodeStashTable(table);
-            String fromFile = String.format("%s/%s/%s/%s", _rootPath, fromStashDir, encodedTable, file);
-            String toFile = String.format("%s/%s/%s/%s", _rootPath, toStashDir, encodedTable, file);
+        public void copyTableFile(StashWriter toStash, String table, String file) {
+            if (toStash instanceof S3StashIO) {
+                S3StashIO s3Dest = (S3StashIO) toStash;
+                String encodedTable = encodeStashTable(table);
+                String fromFile = String.format("%s/%s/%s", _stashPath, encodedTable, file);
+                String toFile = String.format("%s/%s/%s", s3Dest._stashPath, encodedTable, file);
 
-            s3().copyObject(_bucket, fromFile, _bucket, toFile);
+                s3().copyObject(_bucket, fromFile, s3Dest._bucket, toFile);
+            } else {
+                throw new UnsupportedOperationException("Copying between different Stash schemes is currently unsupported");
+            }
         }
 
         @Override
-        public Iterator<String> readStashTableFile(String stashDir, String table, String file) {
+        public Iterator<String> readStashTableFile(String table, String file) {
             String encodedTable = encodeStashTable(table);
-            String s3File = String.format("%s/%s/%s/%s", _rootPath, stashDir, encodedTable, file);
+            String s3File = String.format("%s/%s/%s", _stashPath, encodedTable, file);
 
             try {
                 S3Object s3Object = s3().getObject(_bucket, s3File);
@@ -213,25 +241,56 @@ abstract public class StashIO implements Serializable {
                 throw e;
             }
         }
+
+        @Override
+        public void writeStashTableFile(String table, String suffix, Iterator<String> jsonLines) {
+            String encodedTable = encodeStashTable(table);
+            String s3File = String.format("%s/%s/%s-%s.gz", _stashPath, encodedTable, encodedTable, suffix);
+
+//            ByteArrayOutputStream out = new ByteArrayOutputStream(5 * MB);
+//            try {
+//                s3().uploadPart(new UploadPartRequest().)
+//                new TransferManager(s3()).upload(new PutObjectRequest().)
+//                S3Object s3Object = s3().getObject(_bucket, s3File);
+//                return readJsonLines(s3Object.getObjectContent(), file);
+//            } catch (AmazonS3Exception e) {
+//                if (e.getStatusCode() == Response.Status.NOT_FOUND.getStatusCode()) {
+//                    return Iterators.emptyIterator();
+//                }
+//                throw e;
+//            }
+            // TODO:  Code this
+        }
+
+        @Override
+        public String getStashDirectory() {
+            return _stashPath.substring(_stashPath.lastIndexOf('/') + 1);
+        }
     }
 
     private static class LocalFileStashIO extends StashIO {
 
-        private final File _rootDir;
+        private final File _stashDir;
 
-        LocalFileStashIO(URI uri) {
-            _rootDir = new File(uri.getPath());
+        LocalFileStashIO(URI uri, @Nullable String stashDir) {
+            File rootDir = new File(uri.getPath());
+            if (stashDir == null) {
+                stashDir = getLatest(rootDir);
+            }
+            _stashDir = new File(rootDir, stashDir);
+        }
+
+        private String getLatest(File rootDir) {
+            try {
+                return Files.readFirstLine(new File(rootDir, "_LATEST"), Charsets.UTF_8);
+            } catch (IOException e) {
+                throw Throwables.propagate(e);
+            }
         }
 
         @Override
-        public String getLatest() throws IOException {
-            return Files.readFirstLine(new File(_rootDir, "_LATEST"), Charsets.UTF_8);
-        }
-
-        @Override
-        public List<String> getTableFilesFromStash(String stashDir, String table) {
-            File stashRootDir = new File(_rootDir, stashDir);
-            File tableDir = new File(stashRootDir, encodeStashTable(table));
+        public List<String> getTableFilesFromStash(String table) {
+            File tableDir = new File(_stashDir, encodeStashTable(table));
             if (tableDir.exists() && tableDir.isDirectory()) {
                 File[] tableFiles = tableDir.listFiles(File::isFile);
                 if (tableFiles != null) {
@@ -242,34 +301,56 @@ abstract public class StashIO implements Serializable {
         }
 
         @Override
-        public void copyTableFile(String fromStashDir, String toStashDir, String table, String file) {
-            String encodedTable = encodeStashTable(table);
-            File fromRootDir = new File(_rootDir, fromStashDir);
-            File fromFile = new File(new File(fromRootDir, encodedTable), file);
-            File toRootDir = new File(_rootDir, toStashDir);
-            File toFile = new File(new File(toRootDir, encodedTable), file);
+        public void copyTableFile(StashWriter toStash, String table, String file) {
+            if (toStash instanceof LocalFileStashIO) {
+                LocalFileStashIO localDest = (LocalFileStashIO) toStash;
+                String encodedTable = encodeStashTable(table);
+                File fromFile = new File(new File(_stashDir, encodedTable), file);
+                File toFile = new File(new File(localDest._stashDir, encodedTable), file);
 
-            if (fromFile.exists()) {
-                try {
-                    Files.createParentDirs(toFile);
-                    Files.copy(fromFile, toFile);
-                } catch (IOException e) {
-                    throw Throwables.propagate(e);
+                if (fromFile.exists()) {
+                    try {
+                        Files.createParentDirs(toFile);
+                        Files.copy(fromFile, toFile);
+                    } catch (IOException e) {
+                        throw Throwables.propagate(e);
+                    }
                 }
+            } else {
+                throw new UnsupportedOperationException("Copying between different Stash schemes is currently unsupported");
             }
         }
 
         @Override
-        public Iterator<String> readStashTableFile(String stashDir, String table, String file) {
+        public Iterator<String> readStashTableFile(String table, String file) {
             String encodedTable = encodeStashTable(table);
-            File stashRootDir = new File(_rootDir, stashDir);
-            File fromFile = new File(new File(stashRootDir, encodedTable), file);
+            File fromFile = new File(new File(_stashDir, encodedTable), file);
 
             try {
                 return readJsonLines(new FileInputStream(fromFile), file);
             } catch (FileNotFoundException e) {
                 return Iterators.emptyIterator();
             }
+        }
+
+        @Override
+        public void writeStashTableFile(String table, String suffix, Iterator<String> jsonLines) {
+            // Base the file suffix on a hash of the first entry's key
+            String encodedTable = encodeStashTable(table);
+            String fileName = String.format("%s-%s.gz", table, suffix);
+            File toFile = new File(new File(_stashDir, encodedTable), fileName);
+
+            try {
+                Files.createParentDirs(toFile);
+                writeJsonLines(new FileOutputStream(toFile), jsonLines);
+            } catch (IOException e) {
+                throw Throwables.propagate(e);
+            }
+        }
+
+        @Override
+        public String getStashDirectory() {
+            return _stashDir.getName();
         }
     }
 }
