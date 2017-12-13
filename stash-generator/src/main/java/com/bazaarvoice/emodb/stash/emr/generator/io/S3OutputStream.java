@@ -12,12 +12,14 @@ import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.UploadPartRequest;
 import com.amazonaws.services.s3.model.UploadPartResult;
 import com.clearspring.analytics.util.Lists;
+import org.apache.spark.util.ByteBufferInputStream;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.io.ByteArrayInputStream;
 import java.io.IOException;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.nio.ByteBuffer;
 import java.util.List;
 
 public class S3OutputStream extends OutputStream {
@@ -27,14 +29,13 @@ public class S3OutputStream extends OutputStream {
     private final AmazonS3 _s3;
     private final String _bucket;
     private final String _key;
-    private final byte[] _buffer;
+    private final ByteBuffer _buffer;
 
     private int _part = 1;
-    private int _pos = 0;
     private String _uploadId;
     private List<PartETag> _partETags;
 
-    public S3OutputStream(AmazonS3 s3, String bucket, String key, byte[] buffer) {
+    public S3OutputStream(AmazonS3 s3, String bucket, String key, ByteBuffer buffer) {
         _s3 = s3;
         _bucket = bucket;
         _key = key;
@@ -43,10 +44,10 @@ public class S3OutputStream extends OutputStream {
 
     @Override
     public void write(int b) throws IOException {
-        if (_pos == _buffer.length) {
+        if (_buffer.remaining() == 0) {
             uploadBuffer();
         }
-        _buffer[_pos++] = (byte) b;
+        _buffer.put((byte) b);
     }
 
     @Override
@@ -57,12 +58,13 @@ public class S3OutputStream extends OutputStream {
     @Override
     public void write(byte[] b, int off, int len) throws IOException {
         int remaining = len;
+        int pos = off;
 
         while (remaining != 0) {
-            int available = Math.min(_buffer.length - _pos, remaining);
+            int available = Math.min(_buffer.remaining(), remaining);
             if (available != 0) {
-                System.arraycopy(b, off, _buffer, _pos, available);
-                _pos += available;
+                _buffer.put(b, pos, available);
+                pos += available;
                 remaining -= available;
             }
 
@@ -88,12 +90,12 @@ public class S3OutputStream extends OutputStream {
                     .withKey(_key)
                     .withUploadId(_uploadId)
                     .withPartNumber(_part)
-                    .withPartSize(_pos)
-                    .withInputStream(new ByteArrayInputStream(_buffer, 0, _pos)));
+                    .withPartSize(_buffer.position())
+                    .withInputStream(asInputStream(_buffer)));
 
             _partETags.add(response.getPartETag());
             _part += 1;
-            _pos = 0;
+            _buffer.position(0);
         } catch (AmazonClientException e) {
             throw abortMulitpartUpload(e);
         }
@@ -106,12 +108,12 @@ public class S3OutputStream extends OutputStream {
             ObjectMetadata objectMetadata = new ObjectMetadata();
             objectMetadata.setContentType("application/text");
             objectMetadata.setContentEncoding("gzip");
-            objectMetadata.setContentLength(_pos);
+            objectMetadata.setContentLength(_buffer.position());
 
-            _s3.putObject(new PutObjectRequest(_bucket, _key, new ByteArrayInputStream(_buffer, 0, _pos), objectMetadata));
+            _s3.putObject(new PutObjectRequest(_bucket, _key, asInputStream(_buffer), objectMetadata));
         } else {
             // Multipart file
-            if (_pos != 0) {
+            if (_buffer.position() != 0) {
                 uploadBuffer();
             }
 
@@ -132,5 +134,9 @@ public class S3OutputStream extends OutputStream {
             }
         }
         throw new IOException(e);
+    }
+
+    private InputStream asInputStream(ByteBuffer buffer) {
+        return new ByteBufferInputStream((ByteBuffer) buffer.asReadOnlyBuffer().flip());
     }
 }

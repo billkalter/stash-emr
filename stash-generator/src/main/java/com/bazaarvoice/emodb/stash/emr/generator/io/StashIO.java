@@ -13,6 +13,8 @@ import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.google.common.base.Charsets;
 import com.google.common.base.Throwables;
+import com.google.common.cache.Cache;
+import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
@@ -39,6 +41,7 @@ import java.io.OutputStream;
 import java.io.OutputStreamWriter;
 import java.io.Serializable;
 import java.net.URI;
+import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
@@ -137,6 +140,9 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
     }
 
     private static class S3StashIO extends StashIO {
+
+        private static final BufferPool BUFFER_POOL = new BufferPool(12, 10 * MB);
+        
         private final String _bucket;
         private final String _stashPath;
         private final String _region;
@@ -248,13 +254,17 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
             String encodedTable = encodeStashTable(table);
             String s3File = String.format("%s/%s/%s-%s.gz", _stashPath, encodedTable, encodedTable, suffix);
 
-            // TODO:  Maybe use a pool of byte arrays?
-            byte[] buffer = new byte[10 * MB];
-            S3OutputStream out = new S3OutputStream(s3(), _bucket, s3File, buffer);
+            ByteBuffer buffer = null;
             try {
+                buffer = BUFFER_POOL.getBuffer();
+                S3OutputStream out = new S3OutputStream(s3(), _bucket, s3File, buffer);
                 writeJsonLines(out, jsonLines);
             } catch (IOException e) {
                 throw Throwables.propagate(e);
+            } finally {
+                if (buffer != null) {
+                    BUFFER_POOL.returnBuffer(buffer);
+                }
             }
         }
 
