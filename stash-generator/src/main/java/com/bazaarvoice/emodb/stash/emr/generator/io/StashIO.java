@@ -141,10 +141,11 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         private final String _stashPath;
         private final String _region;
 
-        private volatile AmazonS3 _s3;
+        private transient AmazonS3 _s3;
 
         S3StashIO(URI uri, @Nullable String stashDir, String region) {
             _bucket = uri.getHost();
+            _region = region;
             String rootPath = uri.getPath();
             if (rootPath.startsWith("/")) {
                 rootPath = rootPath.substring(1);
@@ -156,7 +157,6 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
                 stashDir = getLatest(_bucket, rootPath);
             }
             _stashPath = String.format("%s/%s", rootPath, stashDir);
-            _region = region;
         }
 
         private AmazonS3 s3() {

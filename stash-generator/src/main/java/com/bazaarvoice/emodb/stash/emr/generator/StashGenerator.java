@@ -97,6 +97,10 @@ public class StashGenerator {
         argParser.addArgument("--noOptimizeUnmodifiedTables")
                 .action(new StoreTrueArgumentAction())
                 .help("Disable optimization for copying unmodified tables.  Useful for local testing.");
+        argParser.addArgument("--partitionSize")
+                .type(Integer.class)
+                .setDefault(DocumentPartitioner.DEFAULT_PARTITION_SIZE)
+                .help(String.format("Partition size for Stash gzip files (default is %d)", DocumentPartitioner.DEFAULT_PARTITION_SIZE));
 
         Namespace ns = argParser.parseArgs(args);
 
@@ -112,6 +116,7 @@ public class StashGenerator {
         String region = ns.getString("region");
         String existingTablesFile = ns.getString("existingTablesFile");
         boolean optimizeUnmodifiedTables = !ns.getBoolean("noOptimizeUnmodifiedTables");
+        int partitionSize = ns.getInt("partitionSize");
         
         String zkConnectionString = ns.getString("zkConnectionString");
         String zkNamespace = ns.getString("zkNamespace");
@@ -131,15 +136,15 @@ public class StashGenerator {
         DataStore dataStore = new DataStore(dataStoreDiscoveryBuilder, apiKey);
 
         new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, outputStashRoot, stashDate, master,
-                Optional.fromNullable(region), Optional.fromNullable(existingTablesFile), optimizeUnmodifiedTables);
+                Optional.fromNullable(region), Optional.fromNullable(existingTablesFile), optimizeUnmodifiedTables,
+                partitionSize);
     }
 
     public void runStashGenerator(final DataStore dataStore, final String databusSource, final URI stashRoot,
                                   final URI outputStashRoot,
                                   final ZonedDateTime stashTime, @Nullable final String master,
-                                  Optional<String> region,
-                                  Optional<String> existingTablesFile,
-                                  boolean optimizeUnmodifiedTables) throws Exception {
+                                  Optional<String> region, Optional<String> existingTablesFile,
+                                  boolean optimizeUnmodifiedTables, int partitionSize) throws Exception {
 
         SparkConf sparkConf = new SparkConf().setAppName("StashGenerator");
         if (master != null) {
@@ -204,7 +209,7 @@ public class StashGenerator {
 
         futures.add(copyExistingStashTables(unmodifiedTables, priorStash, newStash));
 
-        futures.add(copyAndMergeUpdatedStashTables(context, mergeTables, databusSource, priorStash, newStash, priorStashTime, stashTime));
+        futures.add(copyAndMergeUpdatedStashTables(context, mergeTables, databusSource, priorStash, newStash, priorStashTime, stashTime, partitionSize));
 
         for (JavaFutureAction<Void> future : futures) {
             future.get();
@@ -225,7 +230,8 @@ public class StashGenerator {
     private JavaFutureAction<Void> copyAndMergeUpdatedStashTables(final JavaSparkContext context, final JavaRDD<String> tables,
                                                                   final String databusSource,
                                                                   final StashReader priorStash, final StashWriter newStash,
-                                                                  final ZonedDateTime priorStashTime, final ZonedDateTime stashTime) {
+                                                                  final ZonedDateTime priorStashTime, final ZonedDateTime stashTime,
+                                                                  final int partitionSize) {
 
         // Get all documents from the updated tables
 
@@ -267,7 +273,7 @@ public class StashGenerator {
         JavaPairRDD<DocumentId, String> finalDocsByTable =
                 latestDocs.join(allStashDocs)
                         .mapToPair(t -> new Tuple2<>(t._1.getDocumentId(), t._2._2))
-                        .partitionBy(new DocumentPartitioner(docCountsbyTable));
+                        .partitionBy(new DocumentPartitioner(docCountsbyTable, partitionSize));
 
         return finalDocsByTable.foreachPartitionAsync(t -> {
             // All documents per partition will be for the same table, so peek it from the first entry

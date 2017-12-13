@@ -9,16 +9,16 @@ import java.util.Map;
 
 public class DocumentPartitioner extends Partitioner {
 
-    private final static long TARGET_PARTITION_SIZE = 1000;
+    public final static int DEFAULT_PARTITION_SIZE = 10000;
 
     private final Map<String, TablePartition> _tablePartitions;
     private final int _numPartitions;
 
     public DocumentPartitioner(Map<String, Long> docCountsByTable) {
-        this(docCountsByTable, TARGET_PARTITION_SIZE);
+        this(docCountsByTable, DEFAULT_PARTITION_SIZE);
     }
 
-    public DocumentPartitioner(Map<String, Long> docCountsByTable, long targetPartitionSize) {
+    public DocumentPartitioner(Map<String, Long> docCountsByTable, int targetPartitionSize) {
         int partitionOffset = 0;
 
         _tablePartitions = Maps.newHashMap();

@@ -29,9 +29,9 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
     private final String _service;
     private final URI _directUri;
 
-    private volatile CuratorFramework _rootCurator;
-    private volatile CuratorFramework _curator;
-    private volatile PathChildrenCache _pathCache;
+    private transient volatile CuratorFramework _rootCurator;
+    private transient volatile CuratorFramework _curator;
+    private transient volatile PathChildrenCache _pathCache;
 
     protected EmoServiceDiscovery(String zookeeperConnectionString, String zookeeperNamespace, String service,
                                   URI directUri) {

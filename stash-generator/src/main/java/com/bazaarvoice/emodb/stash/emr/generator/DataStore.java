@@ -41,8 +41,8 @@ public class DataStore implements Serializable, Closeable {
     private final DataStoreDiscovery.Builder _dataStoreDiscoveryBuilder;
     private final String _apiKey;
 
-    private volatile DataStoreDiscovery _dataStoreDiscovery;
-    private volatile JerseyClient _client;
+    private transient volatile DataStoreDiscovery _dataStoreDiscovery;
+    private transient volatile JerseyClient _client;
 
     public DataStore(DataStoreDiscovery.Builder dataStoreDiscoveryBuilder, String apiKey) {
         _dataStoreDiscoveryBuilder = dataStoreDiscoveryBuilder;
@@ -59,7 +59,7 @@ public class DataStore implements Serializable, Closeable {
                 if (!_batch.hasNext()) {
                     Response response = null;
                     try {
-                        UriBuilder uriBuilder = UriBuilder.fromUri(_dataStoreDiscovery.getBaseUri())
+                        UriBuilder uriBuilder = UriBuilder.fromUri(getDataStoreDiscovery().getBaseUri())
                                 .path("sor")
                                 .path("1")
                                 .path("_table")
