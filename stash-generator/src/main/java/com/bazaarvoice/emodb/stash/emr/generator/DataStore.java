@@ -115,8 +115,7 @@ public class DataStore implements Serializable, Closeable {
                 dataStoreDiscovery = _dataStoreDiscovery;
                 if (dataStoreDiscovery == null) {
                     dataStoreDiscovery = _dataStoreDiscoveryBuilder.build();
-                    _dataStoreDiscovery = dataStoreDiscovery;
-                    ListenableFuture<Service.State> future = _dataStoreDiscovery.start();
+                    ListenableFuture<Service.State> future = dataStoreDiscovery.start();
 
                     try {
                         future.get(30, TimeUnit.SECONDS);
@@ -130,6 +129,8 @@ public class DataStore implements Serializable, Closeable {
                     _client = JerseyClientBuilder.createClient(new ClientConfig()
                             .property(ClientProperties.CONNECT_TIMEOUT, (int) Duration.ofSeconds(5).toMillis())
                             .property(ClientProperties.READ_TIMEOUT, (int) Duration.ofSeconds(10).toMillis()));
+
+                    _dataStoreDiscovery = dataStoreDiscovery;
                 }
             }
         }

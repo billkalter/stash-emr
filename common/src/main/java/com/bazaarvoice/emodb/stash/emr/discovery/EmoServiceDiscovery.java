@@ -9,6 +9,8 @@ import org.apache.curator.framework.CuratorFramework;
 import org.apache.curator.framework.recipes.cache.ChildData;
 import org.apache.curator.framework.recipes.cache.PathChildrenCache;
 import org.apache.curator.utils.ZKPaths;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
@@ -23,6 +25,8 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
 public abstract class EmoServiceDiscovery extends AbstractService implements Serializable {
+
+    private static final Logger _log = LoggerFactory.getLogger(EmoServiceDiscovery.class);
 
     private final String _zookeeperConnectionString;
     private final String _zookeeperNamespace;
@@ -47,7 +51,6 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
             try {
                 _rootCurator = CuratorPool.getStartedCurator(_zookeeperConnectionString);
                 _curator = _rootCurator.usingNamespace(_zookeeperNamespace);
-
                 startNodeListener();
             } catch (Exception e) {
                 doStop();
@@ -77,8 +80,7 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
     }
 
     private void startNodeListener() throws Exception {
-        String path = ZKPaths.makePath( "/ostrich", _service);
-
+        String path = ZKPaths.makePath( "ostrich", _service);
         _pathCache = new PathChildrenCache(_curator, path, true);
         _pathCache.getListenable().addListener((curator, event) -> rebuildHosts());
         _pathCache.start(PathChildrenCache.StartMode.BUILD_INITIAL_CACHE);
