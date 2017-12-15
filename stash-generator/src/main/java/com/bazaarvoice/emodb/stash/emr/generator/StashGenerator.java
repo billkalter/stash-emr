@@ -7,8 +7,8 @@ import com.bazaarvoice.emodb.stash.emr.generator.io.StashReader;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashWriter;
 import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
 import com.fasterxml.jackson.databind.util.ISO8601Utils;
-import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
+import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.collect.PeekingIterator;
@@ -46,12 +46,8 @@ import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Iterator;
 import java.util.List;
-import java.util.Map;
 
 import static com.bazaarvoice.emodb.stash.emr.generator.TableStatus.NA;
-import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
-import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.getJson;
-import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.getMetadata;
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.toPollTime;
 import static com.google.common.base.Preconditions.checkArgument;
 
@@ -152,6 +148,7 @@ public class StashGenerator {
         }
 
         JavaSparkContext context = new JavaSparkContext(sparkConf);
+        SQLContext sqlContext = SQLContext.getOrCreate(context.sc());
         StashReader priorStash = StashIO.getLatestStash(stashRoot, region);
         ZonedDateTime priorStashTime = STASH_DIR_FORMAT.parse(priorStash.getStashDirectory(), ZonedDateTime::from);
 
@@ -166,7 +163,7 @@ public class StashGenerator {
                 .mapToPair(tableName -> new Tuple2<>(tableName, TableStatus.EXISTS_IN_EMO));
 
         // Get all tables that have been updated since the last stash
-        JavaPairRDD<String, Short> updatedTables = getDatabusEventsTablesRDD(context, databusSource, priorStashTime, stashTime)
+        JavaPairRDD<String, Short> updatedTables = getDatabusEventsTablesRDD(sqlContext, databusSource, priorStashTime, stashTime)
                 .mapToPair(tableName -> new Tuple2<>(tableName, TableStatus.CONTAINS_UPDATES));
 
         // Map all tables that exist in Emo with any that may have received updates since the last Stash
@@ -209,7 +206,7 @@ public class StashGenerator {
 
         futures.add(copyExistingStashTables(unmodifiedTables, priorStash, newStash));
 
-        futures.add(copyAndMergeUpdatedStashTables(context, mergeTables, databusSource, priorStash, newStash, priorStashTime, stashTime, partitionSize));
+        futures.add(copyAndMergeUpdatedStashTables(sqlContext, mergeTables, databusSource, priorStash, newStash, priorStashTime, stashTime, partitionSize));
 
         for (JavaFutureAction<Void> future : futures) {
             future.get();
@@ -227,13 +224,18 @@ public class StashGenerator {
         return tableFiles.foreachAsync(t -> priorStash.copyTableFile(newStash, t._1, t._2));
     }
 
-    private JavaFutureAction<Void> copyAndMergeUpdatedStashTables(final JavaSparkContext context, final JavaRDD<String> tables,
+    private JavaFutureAction<Void> copyAndMergeUpdatedStashTables(final SQLContext sqlContext, final JavaRDD<String> tables,
                                                                   final String databusSource,
                                                                   final StashReader priorStash, final StashWriter newStash,
                                                                   final ZonedDateTime priorStashTime, final ZonedDateTime stashTime,
                                                                   final int partitionSize) {
 
-        // Get all documents from the updated tables
+        // Get all updated documents
+
+        JavaPairRDD<DocumentId, DocumentLocation> databusDocs =
+                getDocumentsWithDatabusUpdate(sqlContext, databusSource, priorStashTime, stashTime);
+
+        // Get all documents in Stash
 
         JavaPairRDD<String, String> existingTableFiles = tables.flatMapToPair(table ->
                 priorStash.getTableFilesFromStash(table)
@@ -241,50 +243,26 @@ public class StashGenerator {
                         .map(file -> new Tuple2<>(table, file))
                         .iterator());
 
-        JavaPairRDD<DocumentMetadata, String> priorStashDocs = existingTableFiles
-                .flatMap(t -> priorStash.readStashTableFile(t._1, t._2))
-                .mapToPair(json -> new Tuple2<>(parseJson(json, DocumentMetadata.class), json));
+        JavaPairRDD<DocumentId, DocumentLocation> priorStashDocs = existingTableFiles
+                .flatMapToPair(t -> {
+                    final String table = t._1;
+                    final String file = t._2;
+                    final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, file);
+                    return Iterators.transform(lines, e -> new Tuple2<>(
+                            e._2.getDocumentId(), DocumentLocation.stash(table, file, e._1)));
+                });
 
-
-        JavaPairRDD<DocumentMetadata, String> updatedStashDocs =
-                getDatabusEventsRDD(context, databusSource, priorStashTime, stashTime);
-
-        JavaPairRDD<DocumentMetadata, String> allStashDocs =
-                priorStashDocs
-                        .union(updatedStashDocs)
-                        .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
-
-        // Extract the document versions and select the latest
-
-        JavaPairRDD<DocumentMetadata, Boolean> latestDocs = allStashDocs.keys()
-                .keyBy(DocumentMetadata::getDocumentId)
-                .reduceByKey((left, right) ->
-                    left.getDocumentVersion().compareTo(right.getDocumentVersion()) > 0 ? left : right)
-                .values()
-                .filter(md -> !md.isDeleted())
-                .mapToPair(md -> new Tuple2<>(md, true))
+        JavaPairRDD<DocumentLocation, Boolean> allDocsByTable = databusDocs.fullOuterJoin(priorStashDocs)
+                .mapValues(t -> t._1.or(t._2.orNull()))
+                .mapToPair(t -> new Tuple2<>(t._2, true))
                 .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
-        Map<String, Long> docCountsbyTable = latestDocs
-                .mapToPair(md -> new Tuple2<>(md._1.getDocumentId().getTable(), true))
-                .countByKey();
+        // Partition into batches of at most partitionSize docs
+        long docCount = allDocsByTable.count();
 
-        // Re-join with the documents to get the most current documents by table
-        JavaPairRDD<DocumentId, String> finalDocsByTable =
-                latestDocs.join(allStashDocs)
-                        .mapToPair(t -> new Tuple2<>(t._1.getDocumentId(), t._2._2))
-                        .partitionBy(new DocumentPartitioner(docCountsbyTable, partitionSize));
-
-        return finalDocsByTable.foreachPartitionAsync(t -> {
-            // All documents per partition will be for the same table, so peek it from the first entry
-            PeekingIterator<Tuple2<DocumentId, String>> docs = Iterators.peekingIterator(t);
-            if (docs.hasNext()) {
-                String table = docs.peek()._1.getTable();
-                String suffix = Hashing.md5().hashString(docs.peek()._1.getKey(), Charsets.UTF_8).toString();
-                Iterator<String> jsonLines = Iterators.transform(docs, Tuple2::_2);
-                newStash.writeStashTableFile(table, suffix, jsonLines);
-            }
-        });
+        return allDocsByTable
+                .sortByKey(true, (int) Math.ceil(((float) docCount) / partitionSize))
+                .foreachPartitionAsync(iter -> writeStashDocuments(iter, sqlContext, priorStash, newStash, databusSource));
     }
 
     private JavaRDD<String> getEmoTableNamesRDD(JavaSparkContext context, DataStore dataStore, Optional<String> existingTablesFile) {
@@ -308,11 +286,10 @@ public class StashGenerator {
         }
     }
 
-    private JavaRDD<String> getDatabusEventsTablesRDD(JavaSparkContext context, String databusSource,
+    private JavaRDD<String> getDatabusEventsTablesRDD(SQLContext sqlContext, String databusSource,
                                                       ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
 
         final Seq<Object> pollDates = getPollDates(priorStashTime, stashTime);
-        final SQLContext sqlContext = SQLContext.getOrCreate(context.sc());
         final Dataset<Row> dataFrame = sqlContext.read().schema(DocumentSchema.SCHEMA).parquet(databusSource);
 
         return dataFrame.select(dataFrame.col(DocumentSchema.TABLE))
@@ -322,20 +299,22 @@ public class StashGenerator {
                 .toJavaRDD();
     }
 
-    private JavaPairRDD<DocumentMetadata, String> getDatabusEventsRDD(JavaSparkContext context, String databusSource,
-                                                                      ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
+    private JavaPairRDD<DocumentId, DocumentLocation> getDocumentsWithDatabusUpdate(
+            SQLContext sqlContext, String databusSource, ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
         final Seq<Object> pollDates = getPollDates(priorStashTime, stashTime);
-        final SQLContext sqlContext = SQLContext.getOrCreate(context.sc());
         final Dataset<Row> dataFrame = sqlContext.read().schema(DocumentSchema.SCHEMA).parquet(databusSource);
 
         return dataFrame
-                .select(
-                        dataFrame.col(DocumentSchema.TABLE), dataFrame.col(DocumentSchema.KEY),
-                        dataFrame.col(DocumentSchema.VERSION), dataFrame.col(DocumentSchema.LAST_UPDATE_TS),
-                        dataFrame.col(DocumentSchema.DELETED), dataFrame.col(DocumentSchema.JSON))
+                .select(dataFrame.col(DocumentSchema.POLL_DATE), dataFrame.col(DocumentSchema.TABLE), dataFrame.col(DocumentSchema.KEY))
+                .distinct()
                 .where(dataFrame.col(DocumentSchema.POLL_DATE).isin(pollDates))
                 .toJavaRDD()
-                .mapToPair(row -> new Tuple2<>(getMetadata(row), getJson(row)));
+                .mapToPair(row -> {
+                    String pollDate = row.getString(0);
+                    String table = row.getString(1);
+                    String key = row.getString(2);
+                    return new Tuple2<>(new DocumentId(table, key), DocumentLocation.parquet(table, pollDate, key));
+                });
     }
 
     private Seq<Object> getPollDates(ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
@@ -349,5 +328,111 @@ public class StashGenerator {
         }
 
         return pollDates.result();
+    }
+
+    private static void writeStashDocuments(Iterator<Tuple2<DocumentLocation, Boolean>> partitionDocs, SQLContext sqlContext,
+                                     StashReader stashReader, StashWriter stashWriter, String databusSource) {
+        PeekingIterator<DocumentLocation> docs = Iterators.peekingIterator(Iterators.transform(partitionDocs, Tuple2::_1));
+
+        Tuple2<String, PeekingIterator<String>> tablePartition = readPartitionJsonForNextTable(docs, sqlContext, stashReader, databusSource);
+        while (tablePartition != null) {
+            String table = tablePartition._1;
+            Iterator<String> jsonLines = tablePartition._2;
+
+            // Use the hash from the first document to uniquely name the file
+            String suffix = Hashing.md5().hashString(jsonLines.next()).toString();
+            stashWriter.writeStashTableFile(table, suffix, jsonLines);
+        }
+    }
+
+    private static Tuple2<String, PeekingIterator<String>> readPartitionJsonForNextTable(PeekingIterator<DocumentLocation> documents,
+                                                           SQLContext sqlContext, StashReader stashReader, String databusSource) {
+        while (documents.hasNext()) {
+            final String table = documents.peek().getTableName();
+
+            Iterator<String> jsonLines = new AbstractIterator<String>() {
+                private Iterator<String> sourceDocs = Iterators.emptyIterator();
+
+                @Override
+                protected String computeNext() {
+                    while (!sourceDocs.hasNext()) {
+                        if (!documents.hasNext() || !documents.peek().getTableName().equals(table)) {
+                            return endOfData();
+                        }
+
+                        if (documents.peek().inParquet()) {
+                            sourceDocs = readPartitionJsonFromParquet(documents, sqlContext, databusSource);
+                        } else {
+                            sourceDocs = readPartitionJsonFromStashFile(documents, stashReader);
+                        }
+                    }
+                    return sourceDocs.next();
+                }
+            };
+
+            if (jsonLines.hasNext()) {
+                return new Tuple2<>(table, Iterators.peekingIterator(jsonLines));
+            }
+        }
+
+        return null;
+    }
+
+    private static Iterator<String> readPartitionJsonFromStashFile(PeekingIterator<DocumentLocation> documents, StashReader stashReader) {
+        if (!documents.hasNext()) {
+            return Iterators.emptyIterator();
+        }
+
+        final DocumentLocation initialLocation = documents.peek();
+
+        final Iterator<Tuple2<Integer, String>> stashFileJson = stashReader.readStashTableFileJson(initialLocation.getTableName(), initialLocation.getStashFile());
+
+        return new AbstractIterator<String>() {
+            @Override
+            protected String computeNext() {
+                if (!documents.hasNext() || !documents.peek().fromSameSource(initialLocation)) {
+                    return endOfData();
+                }
+                DocumentLocation documentLocation = documents.next();
+                int nextLineNum = documentLocation.getStashLine();
+
+                Tuple2<Integer, String> stashLine = null;
+                while (stashFileJson.hasNext() && (stashLine = stashFileJson.next())._1 < nextLineNum) {
+                    stashFileJson.next();
+                }
+
+                return stashLine._2();
+            }
+        };
+    }
+
+    private static Iterator<String> readPartitionJsonFromParquet(PeekingIterator<DocumentLocation> documents, SQLContext sqlContext, String databusSource) {
+        if (!documents.hasNext()) {
+            return Iterators.emptyIterator();
+        }
+
+        final DocumentLocation initialLocation = documents.peek();
+
+        Builder<Object, Seq<Object>> keys = Seq$.MODULE$.newBuilder();
+        while (documents.hasNext() && documents.peek().fromSameSource(initialLocation)) {
+            keys.$plus$eq(documents.next().getParquetKey());
+        }
+        Seq<Object> keySeq = keys.result();
+
+        // TODO:  THIS WON'T WORK
+        final Dataset<Row> dataFrame = sqlContext.read().schema(DocumentSchema.SCHEMA).parquet(databusSource);
+
+        return dataFrame.select(
+                DocumentSchema.KEY, DocumentSchema.VERSION, DocumentSchema.DELETED, DocumentSchema.JSON)
+                .where(
+                        dataFrame.col(DocumentSchema.POLL_DATE).equalTo(initialLocation.getParquetPollDate())
+                                .and(dataFrame.col(DocumentSchema.TABLE).equalTo(initialLocation.getTableName()))
+                                .and(dataFrame.col(DocumentSchema.KEY).isin(keySeq)))
+                .groupByKey(row -> row.getString(0), Encoders.STRING())
+                .reduceGroups((left, right) -> left.getLong(1) > right.getLong(1) ? left : right)
+                .toJavaRDD()
+                .filter(t -> !t._2.getBoolean(2))
+                .map(t -> t._2.getString(3))
+                .toLocalIterator();
     }
 }

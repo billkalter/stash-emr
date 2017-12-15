@@ -11,10 +11,9 @@ import com.amazonaws.services.s3.model.ListObjectsRequest;
 import com.amazonaws.services.s3.model.ObjectListing;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
+import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.google.common.base.Charsets;
 import com.google.common.base.Throwables;
-import com.google.common.cache.Cache;
-import com.google.common.cache.CacheBuilder;
 import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
@@ -24,12 +23,14 @@ import com.google.common.io.Files;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.apache.spark.api.java.Optional;
+import scala.Tuple2;
 
 import javax.annotation.Nullable;
 import javax.ws.rs.core.Response;
 import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
+import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileNotFoundException;
@@ -49,6 +50,7 @@ import java.util.stream.Collectors;
 
 import static com.amazonaws.services.s3.internal.Constants.MB;
 import static com.bazaarvoice.emodb.stash.emr.generator.StashUtil.encodeStashTable;
+import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
 
 abstract public class StashIO implements Serializable, StashReader, StashWriter {
 
@@ -83,7 +85,9 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
 
     abstract public void writeStashTableFile(String table, String suffix, Iterator<String> jsonLines);
 
-    protected Iterator<String> readJsonLines(InputStream inputStream, String fileName) {
+    abstract protected InputStream getFileInputStream(String table, String fileName);
+
+    private Iterator<String> readFileLines(InputStream inputStream, String fileName) {
         try {
             if (fileName.endsWith(".gz")) {
                 inputStream = new GzipCompressorInputStream(inputStream, true);
@@ -127,6 +131,32 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
                 }
             }
         };
+    }
+
+    private <T> Iterator<Tuple2<Integer, T>> countingIterator(final Iterator<T> iterator) {
+        return new AbstractIterator<Tuple2<Integer, T>>() {
+            int num = 1;
+
+            @Override
+            protected Tuple2<Integer, T> computeNext() {
+                if (iterator.hasNext()) {
+                    return new Tuple2<>(num++, iterator.next());
+                }
+                return endOfData();
+            }
+        };
+    }
+
+    @Override
+    public Iterator<Tuple2<Integer, String>> readStashTableFileJson(String table, String file) {
+        InputStream inputStream = getFileInputStream(table, file);
+        return countingIterator(readFileLines(inputStream, file));
+    }
+
+    @Override
+    public Iterator<Tuple2<Integer, DocumentMetadata>> readStashTableFileMetadata(String table, String file) {
+        InputStream inputStream = getFileInputStream(table, file);
+        return countingIterator(Iterators.transform(readFileLines(inputStream, file), line -> parseJson(line, DocumentMetadata.class)));
     }
 
     protected void writeJsonLines(OutputStream out, Iterator<String> jsonLines) throws IOException {
@@ -234,16 +264,16 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         }
 
         @Override
-        public Iterator<String> readStashTableFile(String table, String file) {
+        protected InputStream getFileInputStream(String table, String file) {
             String encodedTable = encodeStashTable(table);
             String s3File = String.format("%s/%s/%s", _stashPath, encodedTable, file);
 
             try {
                 S3Object s3Object = s3().getObject(_bucket, s3File);
-                return readJsonLines(s3Object.getObjectContent(), file);
+                return s3Object.getObjectContent();
             } catch (AmazonS3Exception e) {
                 if (e.getStatusCode() == Response.Status.NOT_FOUND.getStatusCode()) {
-                    return Iterators.emptyIterator();
+                    return new ByteArrayInputStream(new byte[0]);
                 }
                 throw e;
             }
@@ -328,14 +358,14 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         }
 
         @Override
-        public Iterator<String> readStashTableFile(String table, String file) {
+        protected InputStream getFileInputStream(String table, String file) {
             String encodedTable = encodeStashTable(table);
             File fromFile = new File(new File(_stashDir, encodedTable), file);
 
             try {
-                return readJsonLines(new FileInputStream(fromFile), file);
+                return new FileInputStream(fromFile);
             } catch (FileNotFoundException e) {
-                return Iterators.emptyIterator();
+                return new ByteArrayInputStream(new byte[0]);
             }
         }
 
