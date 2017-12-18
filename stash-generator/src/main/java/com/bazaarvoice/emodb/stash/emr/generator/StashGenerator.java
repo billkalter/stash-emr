@@ -32,6 +32,7 @@ import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.catalyst.expressions.GenericRow;
 import org.apache.spark.sql.types.DataTypes;
+import org.apache.spark.storage.StorageLevel;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Tuple2;
@@ -247,18 +248,29 @@ public class StashGenerator {
                 priorStash.getTableFilesFromStash(table)
                         .stream()
                         .map(file -> new StashFile(table, file))
-                        .iterator());
+                        .iterator())
+                .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
-        JavaPairRDD<DocumentId, StashLocation> documentsInPriorStash = priorStashFiles
-                .flatMapToPair(stashFile -> {
-                    final String table = stashFile.getTable();
-                    final String file = stashFile.getFile();
-                    final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, file);
-                    return Iterators.transform(lines, t -> new Tuple2<>(t._2.getDocumentId(), new StashLocation(file, t._1)));
-                });
+        // Force Spark to split these up and not create a single partition with every file in it
+        long priorStashFileCount = priorStashFiles.count();
+
+        JavaPairRDD<DocumentId, StashLocation> documentsInPriorStash;
+        if (priorStashFileCount == 0) {
+            documentsInPriorStash = sqlContext.emptyDataFrame().toJavaRDD().flatMapToPair(row -> Iterators.emptyIterator());
+        } else {
+            documentsInPriorStash = priorStashFiles
+                    .repartition((int) Math.ceil((float) priorStashFileCount / 10))
+                    .flatMapToPair(stashFile -> {
+                        final String table = stashFile.getTable();
+                        final String file = stashFile.getFile();
+                        final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, file);
+                        return Iterators.transform(lines, t -> new Tuple2<>(t._2.getDocumentId(), new StashLocation(file, t._1)));
+                    })
+                    .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
+        }
 
         // Fully join the two to get the set of all documents
-        JavaPairRDD < DocumentId, Tuple2 < Optional <UUID>, Optional <StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash);
+        JavaPairRDD <DocumentId, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash);
 
         // For all documents with any databus updates write them to Stash from databus parquet
         JavaRDD<UUID> unsortedDatabusOutputDocs =

@@ -2,7 +2,9 @@ package com.bazaarvoice.emodb.stash.emr.generator;
 
 import com.google.common.base.Objects;
 
-public class StashFile {
+import java.io.Serializable;
+
+public class StashFile implements Serializable {
     private final String _table;
     private final String _file;
 
