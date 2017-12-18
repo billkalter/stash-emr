@@ -1,7 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.databus;
 
 import com.bazaarvoice.emodb.stash.emr.DocumentId;
-import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
@@ -26,7 +25,6 @@ import java.net.URI;
 import java.time.Instant;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
-import java.util.Date;
 
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.POLL_DATE;
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.TABLE;
@@ -106,18 +104,19 @@ public class DatabusAccumulator implements Serializable {
         JavaStreamingContext streamingContext = new JavaStreamingContext(sparkConf, batchInterval);
         Broadcast<String> broadcastDestination = streamingContext.sparkContext().broadcast(destination);
 
-        JavaDStream<Tuple2<DocumentMetadata, String>> eventStream = streamingContext.receiverStream(databusReceiver);
+        JavaDStream<DatabusEvent> eventStream = streamingContext.receiverStream(databusReceiver);
         // Group events by document id
-        JavaPairDStream<DocumentId, Tuple2<DocumentMetadata, String>> eventsById = eventStream.mapToPair(
-                tuple2 -> new Tuple2<>(tuple2._1.getDocumentId(), tuple2));
+        JavaPairDStream<DocumentId, DatabusEvent> eventsById = eventStream.mapToPair(
+                event -> new Tuple2<>(event.getDocumentMetadata().getDocumentId(), event));
         // Dedup events within the stream, keeping only the most recent if multiple updates occurred
-        JavaPairDStream<DocumentId, Tuple2<DocumentMetadata, String>> dedupEvents =
+        JavaPairDStream<DocumentId, DatabusEvent> dedupEvents =
                 eventsById.reduceByKey(DatabusAccumulator::newestDocumentVersion);
 
         dedupEvents.foreachRDD((rdd, time) -> {
             SQLContext sqlContext = SQLContext.getOrCreate(rdd.context());
             Dataset<Row> dataFrame = sqlContext.createDataFrame(
-                    rdd.values().map(tuple2 -> toRow(tuple2._1, tuple2._2, ZonedDateTime.ofInstant(Instant.ofEpochMilli(time.milliseconds()), ZoneOffset.UTC))),
+                    rdd.values().map(event -> toRow(event.getUpdateId(), event.getDocumentMetadata(), event.getJson(),
+                            ZonedDateTime.ofInstant(Instant.ofEpochMilli(time.milliseconds()), ZoneOffset.UTC))),
                     DocumentSchema.SCHEMA);
 
             dataFrame.write().mode(SaveMode.Append).partitionBy(POLL_DATE, TABLE).parquet(broadcastDestination.value());
@@ -127,8 +126,8 @@ public class DatabusAccumulator implements Serializable {
         streamingContext.awaitTermination();
     }
 
-    private static Tuple2<DocumentMetadata, String> newestDocumentVersion(Tuple2<DocumentMetadata, String> left, Tuple2<DocumentMetadata, String> right) {
-        if (left._1.getDocumentVersion().compareTo( right._1.getDocumentVersion()) < 0) {
+    private static DatabusEvent newestDocumentVersion(DatabusEvent left, DatabusEvent right) {
+        if (left.getDocumentMetadata().getDocumentVersion().compareTo( right.getDocumentMetadata().getDocumentVersion()) < 0) {
             return right;
         }
         return left;

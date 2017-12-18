@@ -24,7 +24,6 @@ import org.glassfish.jersey.client.JerseyClient;
 import org.glassfish.jersey.client.JerseyClientBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import scala.Tuple2;
 
 import javax.ws.rs.client.Entity;
 import javax.ws.rs.core.MediaType;
@@ -37,6 +36,7 @@ import java.time.Duration;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Random;
+import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -49,7 +49,7 @@ import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.toJsonString;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
-public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> {
+public class DatabusReceiver extends Receiver<DatabusEvent> {
 
     private final static Logger _log = LoggerFactory.getLogger(DatabusReceiver.class);
 
@@ -180,10 +180,10 @@ public class DatabusReceiver extends Receiver<Tuple2<DocumentMetadata, String>> 
                     response.close();
                 }
 
-                Iterator<Tuple2<DocumentMetadata, String>> documents = Iterators.transform(events.iterator(), event -> {
+                Iterator<DatabusEvent> documents = Iterators.transform(events.iterator(), event -> {
                     // Lazily build the list of event keys to ack
                     eventKeys.add(event.eventKey);
-                    return new Tuple2<>(event.documentMetadata, event.content);
+                    return new DatabusEvent(UUID.randomUUID(), event.documentMetadata, event.content);
 
                 });
 

@@ -1,8 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.sql;
 
-import com.bazaarvoice.emodb.stash.emr.DocumentId;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
-import com.bazaarvoice.emodb.stash.emr.DocumentVersion;
 import com.google.common.collect.ImmutableList;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.catalyst.expressions.GenericRow;
@@ -13,10 +11,12 @@ import org.apache.spark.sql.types.StructType;
 import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
+import java.util.UUID;
 
 public class DocumentSchema {
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
 
+    public static final String UPDATE_ID = "updateId";
     public static final String TABLE = "table";
     public static final String KEY = "key";
     public static final String VERSION = "version";
@@ -27,6 +27,7 @@ public class DocumentSchema {
 
     public static final StructType SCHEMA = DataTypes.createStructType(
             ImmutableList.<StructField>builder()
+                    .add(DataTypes.createStructField(UPDATE_ID, DataTypes.StringType, false))
                     .add(DataTypes.createStructField(TABLE, DataTypes.StringType, false))
                     .add(DataTypes.createStructField(KEY, DataTypes.StringType, false))
                     .add(DataTypes.createStructField(VERSION, DataTypes.LongType, false))
@@ -36,8 +37,9 @@ public class DocumentSchema {
                     .add(DataTypes.createStructField(POLL_DATE, DataTypes.StringType, false))
                     .build());
 
-    public static Row toRow(DocumentMetadata metadata, String json, ZonedDateTime pollTime) {
+    public static Row toRow(UUID id, DocumentMetadata metadata, String json, ZonedDateTime pollTime) {
         return new GenericRow(new Object[] {
+                id.toString(),
                 metadata.getDocumentId().getTable(),
                 metadata.getDocumentId().getKey(),
                 metadata.getDocumentVersion().getVersion(),
@@ -52,18 +54,7 @@ public class DocumentSchema {
         return DATE_FORMAT.format(pollTime);
     }
 
-    public static String getTable(Row row) {
-        return row.getString(0);
-    }
-
-    public static DocumentMetadata getMetadata(Row row) {
-        return new DocumentMetadata(
-                new DocumentId(row.getString(0), row.getString(1)),
-                new DocumentVersion(row.getLong(2), row.getLong(3)),
-                row.getBoolean(4));
-    }
-
-    public static String getJson(Row row) {
-        return row.getString(5);
+    public static UUID toUpdateId(String updateId) {
+        return UUID.fromString(updateId);
     }
 }
