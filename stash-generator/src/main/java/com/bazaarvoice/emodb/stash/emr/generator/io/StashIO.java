@@ -373,7 +373,7 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         public void writeStashTableFile(String table, String suffix, Iterator<String> jsonLines) {
             // Base the file suffix on a hash of the first entry's key
             String encodedTable = encodeStashTable(table);
-            String fileName = String.format("%s-%s.gz", table, suffix);
+            String fileName = String.format("%s-%s.gz", encodedTable, suffix);
             File toFile = new File(new File(_stashDir, encodedTable), fileName);
 
             try {

@@ -242,12 +242,25 @@ public class StashGenerator {
         JavaPairRDD<DocumentId, UUID> documentsInDatabus = getDocumentsWithDatabusUpdate(sqlContext, databusSource, priorStashTime, stashTime);
 
         // Get all documents that exist in the prior Stash
-        JavaPairRDD<DocumentId, StashLocation> documentsInPriorStash = null;
+
+        JavaRDD<StashFile> priorStashFiles = tables.flatMap(table ->
+                priorStash.getTableFilesFromStash(table)
+                        .stream()
+                        .map(file -> new StashFile(table, file))
+                        .iterator());
+
+        JavaPairRDD<DocumentId, StashLocation> documentsInPriorStash = priorStashFiles
+                .flatMapToPair(stashFile -> {
+                    final String table = stashFile.getTable();
+                    final String file = stashFile.getFile();
+                    final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, file);
+                    return Iterators.transform(lines, t -> new Tuple2<>(t._2.getDocumentId(), new StashLocation(file, t._1)));
+                });
 
         // Fully join the two to get the set of all documents
-        JavaPairRDD<DocumentId, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash);
+        JavaPairRDD < DocumentId, Tuple2 < Optional <UUID>, Optional <StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash);
 
-        // For all documents with any databus updates write them to Stash
+        // For all documents with any databus updates write them to Stash from databus parquet
         JavaRDD<UUID> unsortedDatabusOutputDocs =
                 allDocuments.filter(t -> t._2._1.isPresent())
                         .map(t -> t._2._1.get());
@@ -259,7 +272,7 @@ public class StashGenerator {
                 .toJavaRDD()
                 .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash));
 
-        // For all documents from the prior Stash that are updated write them to Stash
+        // For all documents from the prior Stash that are not updated write them to Stash
         JavaRDD<Tuple2<String, StashLocation>> unsortedPriorStashOutputDocs =
                 allDocuments.filter(t -> !t._2._1.isPresent()).map(t -> new Tuple2<>(t._1.getTable(), t._2._2.get()));
 
@@ -446,7 +459,7 @@ public class StashGenerator {
         return new AbstractIterator<String>() {
             @Override
             protected String computeNext() {
-                if (!sortedLineNumbers.hasNext() || stashFileJson.hasNext()) {
+                if (!sortedLineNumbers.hasNext() || !stashFileJson.hasNext()) {
                     return endOfData();
                 }
 
