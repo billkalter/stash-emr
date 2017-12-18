@@ -279,9 +279,9 @@ public class StashGenerator {
         
         long databusOutputDocCount = unsortedDatabusOutputDocs.count();
 
-        JavaFutureAction<Void> databusFuture = getSortedUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime)
-                .repartition((int) Math.ceil((float) databusOutputDocCount / partitionSize))
+        JavaFutureAction<Void> databusFuture = getUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime)
                 .toJavaRDD()
+                .sortBy(Tuple2::_1, true, (int) Math.ceil((float) databusOutputDocCount / partitionSize))
                 .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash));
 
         // For all documents from the prior Stash that are not updated write them to Stash
@@ -347,7 +347,7 @@ public class StashGenerator {
                 .mapToPair(t -> t);
     }
     
-    private Dataset<Tuple2<String, String>> getSortedUpdatedDocumentsFromDatabus(
+    private Dataset<Tuple2<String, String>> getUpdatedDocumentsFromDatabus(
             JavaRDD<UUID> updateIds, SQLContext sqlContext, String databusSource, ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
 
         JavaRDD<Row> rows = updateIds
@@ -365,7 +365,6 @@ public class StashGenerator {
                 .select(DocumentSchema.TABLE, DocumentSchema.JSON)
                 .where(joinedDocsdataset.col(DocumentSchema.POLL_DATE).isin(pollDates)
                         .and(joinedDocsdataset.col(DocumentSchema.DELETED).equalTo(false)))
-                .orderBy(DocumentSchema.TABLE)
                 .map(row -> new Tuple2<>(row.getString(0), row.getString(1)), Encoders.tuple(Encoders.STRING(), Encoders.STRING()));
     }
 
