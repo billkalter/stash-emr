@@ -292,14 +292,14 @@ public class StashGenerator {
         }
 
         // For all documents from the prior Stash that are not updated write them to Stash
-        JavaRDD<Tuple2<String, StashLocation>> unsortedPriorStashOutputDocs =
-                allDocuments.filter(t -> !t._2._1.isPresent()).map(t -> new Tuple2<>(t._1.getTable(), t._2._2.get()));
+        JavaRDD<StashTableAndLocation> unsortedPriorStashOutputDocs = allDocuments
+                .filter(t -> !t._2._1.isPresent())
+                .map(t -> new StashTableAndLocation(t._1.getTable(), t._2._2.get().getFile(), t._2._2.get().getLine()));
 
         long stashOutputDocCount = unsortedPriorStashOutputDocs.count();
 
         if (stashOutputDocCount != 0) {
             Future<Void> stashFuture = unsortedPriorStashOutputDocs
-                    .map(t -> new StashTableAndLocation(t._1, t._2.getFile(), t._2.getLine()))
                     .sortBy(t -> t, true, (int) Math.ceil((float) stashOutputDocCount / partitionSize))
                     .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, priorStash, newStash));
 

@@ -5,7 +5,7 @@ import com.google.common.collect.ComparisonChain;
 
 import java.io.Serializable;
 
-public class StashTableAndLocation implements Serializable, Comparable<StashTableAndLocation>{
+public class StashTableAndLocation implements Serializable, Comparable<StashTableAndLocation> {
 
     private final String _table;
     private final String _file;

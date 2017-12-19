@@ -37,6 +37,7 @@ public class BufferPool {
     }
 
     public void returnBuffer(ByteBuffer byteBuffer) {
+        byteBuffer.position(0);
         _queue.offer(new WeakReference<>(byteBuffer));
     }
 }
