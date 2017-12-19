@@ -272,6 +272,8 @@ public class StashGenerator {
         // Fully join the two to get the set of all documents
         JavaPairRDD <DocumentId, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash);
 
+        List<Future<Void>> futures = Lists.newArrayListWithCapacity(2);
+
         // For all documents with any databus updates write them to Stash from databus parquet
         JavaRDD<UUID> unsortedDatabusOutputDocs =
                 allDocuments.filter(t -> t._2._1.isPresent())
@@ -279,10 +281,14 @@ public class StashGenerator {
         
         long databusOutputDocCount = unsortedDatabusOutputDocs.count();
 
-        JavaFutureAction<Void> databusFuture = getUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime)
-                .toJavaRDD()
-                .sortBy(Tuple2::_1, true, (int) Math.ceil((float) databusOutputDocCount / partitionSize))
-                .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash));
+        if (databusOutputDocCount != 0) {
+            Future<Void> databusFuture = getUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime)
+                    .toJavaRDD()
+                    .sortBy(Tuple2::_1, true, (int) Math.ceil((float) databusOutputDocCount / partitionSize))
+                    .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash));
+
+            futures.add(databusFuture);
+        }
 
         // For all documents from the prior Stash that are not updated write them to Stash
         JavaRDD<Tuple2<String, StashLocation>> unsortedPriorStashOutputDocs =
@@ -290,12 +296,16 @@ public class StashGenerator {
 
         long stashOutputDocCount = unsortedPriorStashOutputDocs.count();
 
-        JavaFutureAction<Void> stashFuture = unsortedPriorStashOutputDocs
-                .map(t -> new StashTableAndLocation(t._1, t._2.getFile(), t._2.getLine()))
-                .sortBy(t -> t, true, (int) Math.ceil((float) stashOutputDocCount / partitionSize))
-                .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, priorStash, newStash));
+        if (stashOutputDocCount != 0) {
+            Future<Void> stashFuture = unsortedPriorStashOutputDocs
+                    .map(t -> new StashTableAndLocation(t._1, t._2.getFile(), t._2.getLine()))
+                    .sortBy(t -> t, true, (int) Math.ceil((float) stashOutputDocCount / partitionSize))
+                    .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, priorStash, newStash));
 
-        return ImmutableList.of(databusFuture, stashFuture);
+            futures.add(stashFuture);
+        }
+
+        return futures;
     }
 
     private JavaRDD<String> getAllEmoTables(JavaSparkContext context, DataStore dataStore, Optional<String> existingTablesFile) {
