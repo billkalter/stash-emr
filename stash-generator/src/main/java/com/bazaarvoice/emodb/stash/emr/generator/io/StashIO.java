@@ -21,15 +21,12 @@ import com.google.common.collect.Lists;
 import com.google.common.io.Closeables;
 import com.google.common.io.Files;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
-import org.apache.commons.compress.compressors.gzip.GzipCompressorOutputStream;
 import org.apache.spark.api.java.Optional;
 import scala.Tuple2;
 
 import javax.annotation.Nullable;
 import javax.ws.rs.core.Response;
-import java.io.BufferedOutputStream;
 import java.io.BufferedReader;
-import java.io.BufferedWriter;
 import java.io.ByteArrayInputStream;
 import java.io.File;
 import java.io.FileInputStream;
@@ -39,7 +36,6 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
-import java.io.OutputStreamWriter;
 import java.io.Serializable;
 import java.net.URI;
 import java.nio.ByteBuffer;
@@ -82,8 +78,6 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
     private static String getRegionFrom(Optional<String> region) {
         return region.isPresent() ? region.get() : Regions.getCurrentRegion().getName();
     }
-
-    abstract public void writeStashTableFile(String table, String suffix, Iterator<String> jsonLines);
 
     abstract protected InputStream getFileInputStream(String table, String fileName);
 
@@ -159,20 +153,10 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         return countingIterator(Iterators.transform(readFileLines(inputStream, file), line -> parseJson(line, DocumentMetadata.class)));
     }
 
-    protected void writeJsonLines(OutputStream out, Iterator<String> jsonLines) throws IOException {
-        try (OutputStream gzipOut = new GzipCompressorOutputStream(new BufferedOutputStream(out));
-             BufferedWriter writer = new BufferedWriter(new OutputStreamWriter(gzipOut))) {
-            while (jsonLines.hasNext()) {
-                writer.write(jsonLines.next());
-                writer.newLine();
-            }
-        }
-    }
-
     private static class S3StashIO extends StashIO {
 
         private static final BufferPool BUFFER_POOL = new BufferPool(16, 10 * MB);
-        
+
         private final String _bucket;
         private final String _stashPath;
         private final String _region;
@@ -280,21 +264,32 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         }
 
         @Override
-        public void writeStashTableFile(String table, String suffix, Iterator<String> jsonLines) {
+        public StashFileWriter writeStashTableFile(String table, String suffix) {
             String encodedTable = encodeStashTable(table);
             String s3File = String.format("%s/%s/%s-%s.gz", _stashPath, encodedTable, encodedTable, suffix);
 
-            ByteBuffer buffer = null;
+            final ByteBuffer buffer = BUFFER_POOL.getBuffer();
+            OutputStream s3out = null;
             try {
-                buffer = BUFFER_POOL.getBuffer();
-                S3OutputStream out = new S3OutputStream(s3(), _bucket, s3File, buffer);
-                writeJsonLines(out, jsonLines);
+                s3out = new S3OutputStream(s3(), _bucket, s3File, buffer);
+                return new StashFileWriter(s3out) {
+                    @Override
+                    public void close() throws IOException {
+                        try {
+                            super.close();
+                        } finally {
+                            BUFFER_POOL.returnBuffer(buffer);
+                        }
+                    }
+                };
             } catch (IOException e) {
-                throw Throwables.propagate(e);
-            } finally {
-                if (buffer != null) {
-                    BUFFER_POOL.returnBuffer(buffer);
+                try {
+                    Closeables.close(s3out, true);
+                } catch (IOException ignore) {
+                    // Already managed
                 }
+                BUFFER_POOL.returnBuffer(buffer);
+                throw Throwables.propagate(e);
             }
         }
 
@@ -370,16 +365,23 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         }
 
         @Override
-        public void writeStashTableFile(String table, String suffix, Iterator<String> jsonLines) {
+        public StashFileWriter writeStashTableFile(String table, String suffix) {
             // Base the file suffix on a hash of the first entry's key
             String encodedTable = encodeStashTable(table);
             String fileName = String.format("%s-%s.gz", encodedTable, suffix);
             File toFile = new File(new File(_stashDir, encodedTable), fileName);
 
+            OutputStream fileOut = null;
             try {
                 Files.createParentDirs(toFile);
-                writeJsonLines(new FileOutputStream(toFile), jsonLines);
+                fileOut = new FileOutputStream(toFile);
+                return new StashFileWriter(fileOut);
             } catch (IOException e) {
+                try {
+                    Closeables.close(fileOut, true);
+                } catch (IOException ignore) {
+                    // Already managed
+                }
                 throw Throwables.propagate(e);
             }
         }

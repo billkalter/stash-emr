@@ -2,6 +2,7 @@ package com.bazaarvoice.emodb.stash.emr.generator;
 
 import com.bazaarvoice.emodb.stash.emr.DocumentId;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
+import com.bazaarvoice.emodb.stash.emr.generator.io.StashFileWriter;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashIO;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashReader;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashWriter;
@@ -10,7 +11,7 @@ import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
 import com.fasterxml.jackson.databind.util.ISO8601Utils;
 import com.google.common.base.Charsets;
 import com.google.common.base.Joiner;
-import com.google.common.collect.AbstractIterator;
+import com.google.common.base.Throwables;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
@@ -42,6 +43,7 @@ import scala.collection.mutable.Builder;
 
 import javax.annotation.Nullable;
 import javax.ws.rs.core.UriBuilder;
+import java.io.IOException;
 import java.net.URI;
 import java.text.ParsePosition;
 import java.time.Instant;
@@ -53,7 +55,6 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.Future;
-import java.util.function.Function;
 
 import static com.bazaarvoice.emodb.stash.emr.generator.TableStatus.NA;
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.toPollTime;
@@ -392,111 +393,73 @@ public class StashGenerator {
     }
 
     private static void writeDatabusPartitionToStash(Iterator<Tuple2<String, String>> iter, StashWriter stashWriter) {
-        Iterator<Tuple2<String, PeekingIterator<String>>> jsonByTable = readSortedPartitionByKey(iter, Tuple2::_1, Tuple2::_2);
-        while (jsonByTable.hasNext()) {
-            Tuple2<String, PeekingIterator<String>> t = jsonByTable.next();
-            String table = t._1;
-            PeekingIterator<String> jsonLines = t._2;
+        PeekingIterator<Tuple2<String, String>> peekingIter = Iterators.peekingIterator(iter);
+
+        while (peekingIter.hasNext()) {
+            Tuple2<String, String> t = peekingIter.next();
+            final String currentTable = t._1;
+            String line = t._2;
 
             // Use the hash from the first document to uniquely name the file
-            String key = JsonUtil.parseJson(jsonLines.peek(), DocumentMetadata.class).getDocumentId().getKey();
+            String key = JsonUtil.parseJson(line, DocumentMetadata.class).getDocumentId().getKey();
             String suffix = Hashing.md5().hashString(key, Charsets.UTF_8).toString();
 
-            stashWriter.writeStashTableFile(table, suffix, jsonLines);
+            try (StashFileWriter tableWriter = stashWriter.writeStashTableFile(currentTable, suffix)) {
+                tableWriter.writeJsonLine(line);
+
+                while (peekingIter.hasNext() && peekingIter.peek()._1.equals(currentTable)) {
+                    line = peekingIter.next()._2;
+                    tableWriter.writeJsonLine(line);
+                }
+            } catch (IOException e) {
+                throw Throwables.propagate(e);
+            }
         }
     }
 
     private static void writePriorStashPartitionToStash(Iterator<StashTableAndLocation> iter, StashReader stashReader, StashWriter stashWriter) {
-        final PeekingIterator<Tuple2<StashFile, PeekingIterator<Integer>>> locsByFile = readSortedPartitionByKey(
-                iter, loc -> new StashFile(loc.getTable(), loc.getFile()), StashTableAndLocation::getLine);
+        PeekingIterator<StashTableAndLocation> peekingIter = Iterators.peekingIterator(iter);
 
-        while (locsByFile.hasNext()) {
-            final Tuple2<StashFile, PeekingIterator<Integer>> t = locsByFile.peek();
-            final String table = t._1.getTable();
+        while (peekingIter.hasNext()) {
+            StashTableAndLocation loc = peekingIter.next();
+            final String currentTable = loc.getTable();
+            String currentFile = loc.getFile();
+            int currentLineNum = loc.getLine();
+            Iterator<Tuple2<Integer, String>> stashFileJson = stashReader.readStashTableFileJson(currentTable, currentFile);
 
-            PeekingIterator<String> jsonLines = Iterators.peekingIterator(new AbstractIterator<String>() {
-                private Iterator<String> jsonFromFile = Iterators.emptyIterator();
-
-                @Override
-                protected String computeNext() {
-                    while (!jsonFromFile.hasNext()) {
-                        if (!locsByFile.hasNext() || !locsByFile.peek()._1.getTable().equals(table)) {
-                            return endOfData();
-                        }
-
-                        Tuple2<StashFile, PeekingIterator<Integer>> current = locsByFile.next();
-                        jsonFromFile = readJsonFromStashFile(current._1, stashReader, current._2);
-                    }
-                    return jsonFromFile.next();
-                }
-            });
+            // Move to the first line
+            String jsonLine = forwardToLine(stashFileJson, currentLineNum);
 
             // Use the hash from the first document to uniquely name the file
-            String key = JsonUtil.parseJson(jsonLines.peek(), DocumentMetadata.class).getDocumentId().getKey();
+            String key = JsonUtil.parseJson(jsonLine, DocumentMetadata.class).getDocumentId().getKey();
             String suffix = Hashing.md5().hashString(key, Charsets.UTF_8).toString();
 
-            stashWriter.writeStashTableFile(table, suffix, jsonLines);
-        }
-    }
+            try (StashFileWriter tableWriter = stashWriter.writeStashTableFile(currentTable, suffix)) {
+                tableWriter.writeJsonLine(jsonLine);
 
-    private static <S,K,T> PeekingIterator<Tuple2<K, PeekingIterator<T>>> readSortedPartitionByKey(
-            final Iterator<S> rawEntries, final Function<S, K> toKey, final Function<S, T> toEntry) {
-
-        final PeekingIterator<S> entries = Iterators.peekingIterator(rawEntries);
-
-        Iterator<Tuple2<K, PeekingIterator<T>>> resultIter = new AbstractIterator<Tuple2<K, PeekingIterator<T>>>() {
-            @Override
-            protected Tuple2<K, PeekingIterator<T>> computeNext() {
-                if (!entries.hasNext()) {
-                    return endOfData();
-                }
-
-                final K key = toKey.apply(entries.peek());
-
-                Iterator<T> entriesFromKey = new AbstractIterator<T>() {
-                    @Override
-                    protected T computeNext() {
-                        if (entries.hasNext() && toKey.apply(entries.peek()).equals(key)) {
-                            return toEntry.apply(entries.next());
-                        }
-                        return endOfData();
+                while (peekingIter.hasNext() && peekingIter.peek().getTable().equals(currentTable)) {
+                    loc = peekingIter.next();
+                    if (!loc.getFile().equals(currentFile)) {
+                        currentFile = loc.getFile();
+                        stashFileJson = stashReader.readStashTableFileJson(currentTable, currentFile);
                     }
-                };
-
-                return new Tuple2<>(key, Iterators.peekingIterator(entriesFromKey));
+                    currentLineNum = loc.getLine();
+                    jsonLine = forwardToLine(stashFileJson, currentLineNum);
+                    tableWriter.writeJsonLine(jsonLine);
+                }
+            } catch (IOException e) {
+                throw Throwables.propagate(e);
             }
-        };
-
-        return Iterators.peekingIterator(resultIter);
+        }
     }
 
-    private static Iterator<String> readJsonFromStashFile(StashFile stashFile, StashReader stashReader, Iterator<Integer> sortedLineNumbers) {
-        if (!sortedLineNumbers.hasNext()) {
-            return Iterators.emptyIterator();
-        }
-
-        final Iterator<Tuple2<Integer, String>> stashFileJson = stashReader.readStashTableFileJson(stashFile.getTable(), stashFile.getFile());
-
-        return new AbstractIterator<String>() {
-            @Override
-            protected String computeNext() {
-                if (!sortedLineNumbers.hasNext() || !stashFileJson.hasNext()) {
-                    return endOfData();
-                }
-
-                int nextLineNum = sortedLineNumbers.next();
-
-                Tuple2<Integer, String> stashLine = null;
-                while (stashFileJson.hasNext() && (stashLine = stashFileJson.next())._1 < nextLineNum) {
-                    stashFileJson.next();
-                }
-
-                if (stashLine != null && stashLine._1 == nextLineNum) {
-                    return stashLine._2();
-                }
-
-                return endOfData();
+    private static String forwardToLine(Iterator<Tuple2<Integer, String>> jsonLines, int lineNum) {
+        while (jsonLines.hasNext()) {
+            Tuple2<Integer, String> jsonLine = jsonLines.next();
+            if (jsonLine._1 == lineNum) {
+                return jsonLine._2;
             }
-        };
+        }
+        throw new IllegalStateException("Line not found");
     }
 }
