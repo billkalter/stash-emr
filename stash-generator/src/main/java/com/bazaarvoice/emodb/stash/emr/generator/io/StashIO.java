@@ -9,6 +9,8 @@ import com.amazonaws.services.s3.model.AmazonS3Exception;
 import com.amazonaws.services.s3.model.GetObjectRequest;
 import com.amazonaws.services.s3.model.ListObjectsRequest;
 import com.amazonaws.services.s3.model.ObjectListing;
+import com.amazonaws.services.s3.model.ObjectMetadata;
+import com.amazonaws.services.s3.model.PutObjectRequest;
 import com.amazonaws.services.s3.model.S3Object;
 import com.amazonaws.services.s3.model.S3ObjectSummary;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
@@ -297,6 +299,18 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         public String getStashDirectory() {
             return _stashPath.substring(_stashPath.lastIndexOf('/') + 1);
         }
+
+        @Override
+        public void updateLatestFile() {
+            String key = String.format("%s/_LATEST", _stashPath.substring(0, _stashPath.lastIndexOf('/')));
+            byte[] content = getStashDirectory().getBytes(Charsets.UTF_8);
+
+            ObjectMetadata objectMetadata = new ObjectMetadata();
+            objectMetadata.setContentType("application/text");
+            objectMetadata.setContentLength(content.length);
+
+            _s3.putObject(new PutObjectRequest(_bucket, key, new ByteArrayInputStream(content), objectMetadata));
+        }
     }
 
     private static class LocalFileStashIO extends StashIO {
@@ -389,6 +403,16 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         @Override
         public String getStashDirectory() {
             return _stashDir.getName();
+        }
+
+        @Override
+        public void updateLatestFile() {
+            File latestFile = new File(_stashDir.getParentFile(), "_LATEST");
+            try (FileOutputStream out = new FileOutputStream(latestFile)) {
+                out.write(getStashDirectory().getBytes(Charsets.UTF_8));
+            } catch (IOException e) {
+                throw Throwables.propagate(e);
+            }
         }
     }
 }

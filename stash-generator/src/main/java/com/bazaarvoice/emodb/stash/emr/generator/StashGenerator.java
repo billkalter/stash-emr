@@ -221,6 +221,8 @@ public class StashGenerator {
         for (Future<Void> future : futures) {
             future.get();
         }
+
+        newStash.updateLatestFile();
     }
 
     private JavaFutureAction<Void> copyExistingStashTables(final JavaRDD<String> tables, final StashReader priorStash,
