@@ -214,7 +214,7 @@ public class StashGenerator {
 
         List<Future<Void>> futures = Lists.newArrayListWithCapacity(3);
 
-        futures.add(copyExistingStashTables(unmodifiedTables, priorStash, newStash));
+        futures.addAll(copyExistingStashTables(unmodifiedTables, priorStash, newStash));
 
         futures.addAll(copyAndMergeUpdatedStashTables(sqlContext, mergeTables, databusSource, priorStash, newStash, priorStashTime, stashTime, partitionSize));
 
@@ -225,15 +225,25 @@ public class StashGenerator {
         newStash.updateLatestFile();
     }
 
-    private JavaFutureAction<Void> copyExistingStashTables(final JavaRDD<String> tables, final StashReader priorStash,
+    private List<Future<Void>> copyExistingStashTables(final JavaRDD<String> tables, final StashReader priorStash,
                                                            final StashWriter newStash) {
-        JavaPairRDD<String, String> tableFiles = tables.flatMapToPair(table ->
+        JavaRDD<StashFile> tableFiles = tables.flatMap(table ->
                 priorStash.getTableFilesFromStash(table)
                         .stream()
-                        .map(file -> new Tuple2<>(table, file))
+                        .map(file -> new StashFile(table, file))
                         .iterator());
 
-        return tableFiles.foreachAsync(t -> priorStash.copyTableFile(newStash, t._1, t._2));
+        long fileCount = tableFiles.count();
+
+        if (fileCount == 0) {
+            return ImmutableList.of();
+        }
+        
+        Future<Void> future = tableFiles
+                .repartition((int) Math.ceil((float) fileCount / 20))
+                .foreachAsync(stashFile -> priorStash.copyTableFile(newStash, stashFile.getTable(), stashFile.getFile()));
+
+        return ImmutableList.of(future);
     }
 
     private List<Future<Void>> copyAndMergeUpdatedStashTables(final SQLContext sqlContext, final JavaRDD<String> tables,
