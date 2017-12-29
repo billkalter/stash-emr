@@ -169,7 +169,7 @@ public class StashGenerator {
         checkArgument(priorStashTime.isBefore(stashTime), "Cannot create Stash older than existing latest Stash");
         _log.info("Creating Stash to {} merging with previous stash at {}", newStashDir, priorStash.getStashDirectory());
         
-        // Get all tables that exist in Stash
+        // Get all tables that exist in Emo
         JavaPairRDD<String, Short> emoTables = getAllEmoTables(context, dataStore, existingTablesFile)
                 .mapToPair(tableName -> new Tuple2<>(tableName, TableStatus.EXISTS_IN_EMO));
 
@@ -263,23 +263,7 @@ public class StashGenerator {
             JavaPairRDD<String, UUID> documentsInDatabus = getDocumentsWithDatabusUpdate(sqlContext, table, databusSource, priorStashTime, stashTime);
 
             // Get all documents that exist in the prior Stash
-
-            List<String> priorStashFilesNames = priorStash.getTableFilesFromStash(table);
-
-            JavaRDD<String> priorStashFiles = sparkContext.parallelize(priorStashFilesNames, priorStashFilesNames.size());
-
-            JavaPairRDD<String, StashLocation> documentsInPriorStash;
-            if (priorStashFilesNames.isEmpty()) {
-                documentsInPriorStash = sqlContext.emptyDataFrame().toJavaRDD().flatMapToPair(row -> Iterators.emptyIterator());
-            } else {
-                documentsInPriorStash = priorStashFiles
-                        .repartition((int) Math.ceil((float) priorStashFilesNames.size() / 4))
-                        .flatMapToPair(file -> {
-                            final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, file);
-                            return Iterators.transform(lines, t -> new Tuple2<>(t._2.getDocumentId().getKey(), new StashLocation(file, t._1)));
-                        })
-                        .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
-            }
+            JavaPairRDD<String, StashLocation> documentsInPriorStash = getDocumentsFromPriorStash(sparkContext, table, priorStash);
 
             // Fully join the two to get the set of all documents
             JavaPairRDD<String, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash);
@@ -366,7 +350,25 @@ public class StashGenerator {
                 .toJavaRDD()
                 .mapToPair(t -> t);
     }
-    
+
+    private JavaPairRDD<String, StashLocation> getDocumentsFromPriorStash(final JavaSparkContext sparkContext, final String table, final StashReader priorStash) {
+        List<String> priorStashFilesNames = priorStash.getTableFilesFromStash(table);
+
+        if (priorStashFilesNames.isEmpty()) {
+            return sparkContext.emptyRDD().flatMapToPair(t -> Iterators.emptyIterator());
+        }
+
+        JavaRDD<String> priorStashFiles = sparkContext.parallelize(priorStashFilesNames, (int) Math.ceil((float) priorStashFilesNames.size() / 4));
+        
+        return priorStashFiles
+                .flatMapToPair(file -> {
+                    final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, file);
+                    return Iterators.transform(lines, t -> new Tuple2<>(t._2.getDocumentId().getKey(), new StashLocation(file, t._1)));
+                })
+                .reduceByKey((left, right) -> left.compareTo(right) < 0 ? left : right)
+                .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
+    }
+
     private Dataset<String> getUpdatedDocumentsFromDatabus(
             String table, JavaRDD<UUID> updateIds, SQLContext sqlContext, String databusSource, ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
 
