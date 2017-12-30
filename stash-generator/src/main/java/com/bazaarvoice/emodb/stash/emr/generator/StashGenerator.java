@@ -51,6 +51,7 @@ import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.Iterator;
 import java.util.List;
+import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
@@ -255,15 +256,22 @@ public class StashGenerator {
                                                 final int partitionSize,
                                                 final AsyncOperations asyncOperations) {
 
-        List<String> tables = tablesRDD.collect();
-        List<Future<Void>> futures = Lists.newArrayListWithCapacity(tables.size() * 2);
+        long numTables = tablesRDD.count();
 
-        for (final String table : tables) {
+        Map<String, List<String>> priorStashFilesByTable = tablesRDD
+                .repartition((int) Math.ceil((float) numTables / 10))
+                .mapToPair(table -> new Tuple2<>(table, priorStash.getTableFilesFromStash(table)))
+                .collectAsMap();
+
+        for (final Map.Entry<String, List<String>> tableEntry : priorStashFilesByTable.entrySet()) {
+            final String table = tableEntry.getKey();
+            final List<String> priorStashFiles = tableEntry.getValue();
+
             // Get all documents that exist in Databus
             JavaPairRDD<String, UUID> documentsInDatabus = getDocumentsWithDatabusUpdate(sqlContext, table, databusSource, priorStashTime, stashTime);
 
             // Get all documents that exist in the prior Stash
-            JavaPairRDD<String, StashLocation> documentsInPriorStash = getDocumentsFromPriorStash(sparkContext, table, priorStash);
+            JavaPairRDD<String, StashLocation> documentsInPriorStash = getDocumentsFromPriorStash(sparkContext, table, priorStashFiles, priorStash);
 
             // Fully join the two to get the set of all documents
             JavaPairRDD<String, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash);
@@ -351,14 +359,14 @@ public class StashGenerator {
                 .mapToPair(t -> t);
     }
 
-    private JavaPairRDD<String, StashLocation> getDocumentsFromPriorStash(final JavaSparkContext sparkContext, final String table, final StashReader priorStash) {
-        List<String> priorStashFilesNames = priorStash.getTableFilesFromStash(table);
+    private JavaPairRDD<String, StashLocation> getDocumentsFromPriorStash(final JavaSparkContext sparkContext, final String table,
+                                                                          final List<String> priorStashFileNames, final StashReader priorStash) {
 
-        if (priorStashFilesNames.isEmpty()) {
+        if (priorStashFileNames.isEmpty()) {
             return sparkContext.emptyRDD().flatMapToPair(t -> Iterators.emptyIterator());
         }
 
-        JavaRDD<String> priorStashFiles = sparkContext.parallelize(priorStashFilesNames, (int) Math.ceil((float) priorStashFilesNames.size() / 4));
+        JavaRDD<String> priorStashFiles = sparkContext.parallelize(priorStashFileNames, (int) Math.ceil((float) priorStashFileNames.size() / 4));
         
         return priorStashFiles
                 .flatMapToPair(file -> {
