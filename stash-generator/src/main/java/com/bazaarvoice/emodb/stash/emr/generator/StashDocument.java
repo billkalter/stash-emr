@@ -4,21 +4,21 @@ import com.google.common.base.Objects;
 
 import java.io.Serializable;
 
-public class StashFile implements Serializable {
+public class StashDocument implements Serializable {
     private final int _tableIndex;
-    private final int _fileIndex;
+    private final String _key;
 
-    public StashFile(int tableIndex, int fileIndex) {
+    public StashDocument(int tableIndex, String key) {
         _tableIndex = tableIndex;
-        _fileIndex = fileIndex;
+        _key = key;
     }
 
     public int getTableIndex() {
         return _tableIndex;
     }
 
-    public int getFileIndex() {
-        return _fileIndex;
+    public String getKey() {
+        return _key;
     }
 
     @Override
@@ -26,17 +26,17 @@ public class StashFile implements Serializable {
         if (this == o) {
             return true;
         }
-        if (!(o instanceof StashFile)) {
+        if (!(o instanceof StashDocument)) {
             return false;
         }
 
-        StashFile stashFile = (StashFile) o;
+        StashDocument that = (StashDocument) o;
 
-        return _tableIndex == stashFile._tableIndex && _fileIndex == stashFile._fileIndex;
+        return _tableIndex == that._tableIndex && _key.equals(that._key);
     }
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(_tableIndex, _fileIndex);
+        return Objects.hashCode(_tableIndex, _key);
     }
 }
