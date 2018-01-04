@@ -25,6 +25,7 @@ import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.api.java.Optional;
+import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
@@ -54,7 +55,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.ScheduledExecutorService;
 
 import static com.bazaarvoice.emodb.stash.emr.generator.TableStatus.NA;
@@ -265,7 +265,7 @@ public class StashGenerator {
 
         for (final Map.Entry<String, List<String>> tableEntry : priorStashFilesByTable.entrySet()) {
             final String table = tableEntry.getKey();
-            final List<String> priorStashFiles = tableEntry.getValue();
+            final Broadcast<List<String>> priorStashFiles = sparkContext.broadcast(tableEntry.getValue());
 
             // Get all documents that exist in Databus
             JavaPairRDD<String, UUID> documentsInDatabus = getDocumentsWithDatabusUpdate(sqlContext, table, databusSource, priorStashTime, stashTime);
@@ -301,9 +301,11 @@ public class StashGenerator {
                 if (count != 0) {
                     JavaFutureAction<Void> stashFuture = unsortedPriorStashOutputDocs
                             .sortBy(t -> t, true, (int) Math.ceil((float) count / partitionSize))
-                            .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, table, priorStash, newStash));
+                            .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, table, priorStashFiles, priorStash, newStash));
 
-                    asyncOperations.watch(stashFuture);
+                    asyncOperations.watchAndThen(stashFuture, ignore -> priorStashFiles.destroy());
+                } else {
+                    priorStashFiles.destroy();
                 }
             });
         }
@@ -360,18 +362,25 @@ public class StashGenerator {
     }
 
     private JavaPairRDD<String, StashLocation> getDocumentsFromPriorStash(final JavaSparkContext sparkContext, final String table,
-                                                                          final List<String> priorStashFileNames, final StashReader priorStash) {
+                                                                          final Broadcast<List<String>> priorStashFileNames, final StashReader priorStash) {
 
-        if (priorStashFileNames.isEmpty()) {
+        int priorStashFileCount = priorStashFileNames.getValue().size();
+
+        if (priorStashFileCount == 0) {
             return sparkContext.emptyRDD().flatMapToPair(t -> Iterators.emptyIterator());
         }
 
-        JavaRDD<String> priorStashFiles = sparkContext.parallelize(priorStashFileNames, (int) Math.ceil((float) priorStashFileNames.size() / 4));
+        List<Integer> indexes = Lists.newArrayListWithCapacity(priorStashFileCount);
+        for (int i=0; i < priorStashFileCount; i++) {
+            indexes.add(i);
+        }
+
+        JavaRDD<Integer> priorStashFileIndexes = sparkContext.parallelize(indexes, (int) Math.ceil((float) priorStashFileCount / 4));
         
-        return priorStashFiles
-                .flatMapToPair(file -> {
-                    final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, file);
-                    return Iterators.transform(lines, t -> new Tuple2<>(t._2.getDocumentId().getKey(), new StashLocation(file, t._1)));
+        return priorStashFileIndexes
+                .flatMapToPair(f -> {
+                    final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, priorStashFileNames.getValue().get(f));
+                    return Iterators.transform(lines, l -> new Tuple2<>(l._2.getDocumentId().getKey(), new StashLocation(f, l._1)));
                 })
                 .reduceByKey((left, right) -> left.compareTo(right) < 0 ? left : right)
                 .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
@@ -433,12 +442,13 @@ public class StashGenerator {
         }
     }
 
-    private static void writePriorStashPartitionToStash(Iterator<StashLocation> iter, String table, StashReader stashReader, StashWriter stashWriter) {
+    private static void writePriorStashPartitionToStash(Iterator<StashLocation> iter, String table, Broadcast<List<String>> fileNames,
+                                                        StashReader stashReader, StashWriter stashWriter) {
         if (iter.hasNext()) {
             StashLocation loc = iter.next();
-            String currentFile = loc.getFile();
+            int currentFileIndex = loc.getFileIndex();
             int currentLineNum = loc.getLine();
-            Iterator<Tuple2<Integer, String>> stashFileJson = stashReader.readStashTableFileJson(table, currentFile);
+            Iterator<Tuple2<Integer, String>> stashFileJson = stashReader.readStashTableFileJson(table, fileNames.getValue().get(currentFileIndex));
 
             // Move to the first line
             String jsonLine = forwardToLine(stashFileJson, currentLineNum);
@@ -452,9 +462,9 @@ public class StashGenerator {
 
                 while (iter.hasNext()) {
                     loc = iter.next();
-                    if (!loc.getFile().equals(currentFile)) {
-                        currentFile = loc.getFile();
-                        stashFileJson = stashReader.readStashTableFileJson(table, currentFile);
+                    if (loc.getFileIndex() != currentFileIndex) {
+                        currentFileIndex = loc.getFileIndex();
+                        stashFileJson = stashReader.readStashTableFileJson(table, fileNames.getValue().get(currentFileIndex));
                     }
                     currentLineNum = loc.getLine();
                     jsonLine = forwardToLine(stashFileJson, currentLineNum);

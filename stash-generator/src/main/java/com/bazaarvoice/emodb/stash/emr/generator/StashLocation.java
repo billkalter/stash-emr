@@ -6,16 +6,16 @@ import com.google.common.collect.ComparisonChain;
 import java.io.Serializable;
 
 public class StashLocation implements Serializable, Comparable<StashLocation> {
-    private final String _file;
+    private final int _fileIndex;
     private final int _line;
 
-    public StashLocation(String file, int line) {
-        _file = file;
+    public StashLocation(int fileIndex, int line) {
+        _fileIndex = fileIndex;
         _line = line;
     }
 
-    public String getFile() {
-        return _file;
+    public int getFileIndex() {
+        return _fileIndex;
     }
 
     public int getLine() {
@@ -33,18 +33,18 @@ public class StashLocation implements Serializable, Comparable<StashLocation> {
 
         StashLocation that = (StashLocation) o;
 
-        return _file.equals(that._file) && _line == that._line;
+        return _fileIndex == that._fileIndex && _line == that._line;
     }
 
     @Override
     public int hashCode() {
-        return Objects.hashCode(_file, _line);
+        return Objects.hashCode(_fileIndex, _line);
     }
 
     @Override
     public int compareTo(StashLocation o) {
         return ComparisonChain.start()
-                .compare(_file, o._file)
+                .compare(_fileIndex, o._fileIndex)
                 .compare(_line, o._line)
                 .result();
     }
