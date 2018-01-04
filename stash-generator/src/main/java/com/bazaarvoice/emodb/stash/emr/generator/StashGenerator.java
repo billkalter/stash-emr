@@ -56,6 +56,7 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 
@@ -70,6 +71,7 @@ public class StashGenerator {
 
     private static final DateTimeFormatter STASH_DIR_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd-HH-mm-ss").withZone(ZoneOffset.UTC);
     public static final int DEFAULT_PARTITION_SIZE = 25000;
+    public static final int DEFAULT_MAX_ASYNC_OPERATIONS = 512;
 
     public static void main(String args[]) throws Exception {
         ArgumentParser argParser = ArgumentParsers.newFor("StashGenerator").addHelp(true).build();
@@ -111,6 +113,10 @@ public class StashGenerator {
                 .type(Integer.class)
                 .setDefault(DEFAULT_PARTITION_SIZE)
                 .help(String.format("Partition size for Stash gzip files (default is %d)", DEFAULT_PARTITION_SIZE));
+        argParser.addArgument("--maxAsyncOperations")
+                .type(Integer.class)
+                .setDefault(DEFAULT_MAX_ASYNC_OPERATIONS)
+                .help(String.format("Maximum number of concurrent async spark operations (default is %d)", DEFAULT_MAX_ASYNC_OPERATIONS));
 
         Namespace ns = argParser.parseArgs(args);
 
@@ -127,6 +133,7 @@ public class StashGenerator {
         String existingTablesFile = ns.getString("existingTablesFile");
         boolean optimizeUnmodifiedTables = !ns.getBoolean("noOptimizeUnmodifiedTables");
         int partitionSize = ns.getInt("partitionSize");
+        int maxAsyncOperations = ns.getInt("maxAsyncOperations");
         
         String zkConnectionString = ns.getString("zkConnectionString");
         String zkNamespace = ns.getString("zkNamespace");
@@ -147,14 +154,14 @@ public class StashGenerator {
 
         new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, outputStashRoot, stashDate, master,
                 Optional.fromNullable(region), Optional.fromNullable(existingTablesFile), optimizeUnmodifiedTables,
-                partitionSize);
+                partitionSize, maxAsyncOperations);
     }
 
     public void runStashGenerator(final DataStore dataStore, final String databusSource, final URI stashRoot,
                                   final URI outputStashRoot,
                                   final ZonedDateTime stashTime, @Nullable final String master,
                                   Optional<String> region, Optional<String> existingTablesFile,
-                                  boolean optimizeUnmodifiedTables, int partitionSize) throws Exception {
+                                  boolean optimizeUnmodifiedTables, int partitionSize, int maxAsyncOperations) throws Exception {
 
         SparkConf sparkConf = new SparkConf().setAppName("StashGenerator");
         if (master != null) {
@@ -214,9 +221,10 @@ public class StashGenerator {
                     Joiner.on(",").join(tables));
         });
 
-        ScheduledExecutorService service = Executors.newScheduledThreadPool(2);
+        ScheduledExecutorService monitorService = Executors.newScheduledThreadPool(2);
+        ExecutorService opService = Executors.newCachedThreadPool();
         try {
-            AsyncOperations asyncOperations = new AsyncOperations(service);
+            AsyncOperations asyncOperations = new AsyncOperations(monitorService, opService, maxAsyncOperations);
 
             copyExistingStashTables(unmodifiedTables, priorStash, newStash, asyncOperations);
 
@@ -225,7 +233,8 @@ public class StashGenerator {
 
             asyncOperations.awaitAll();
         } finally {
-            service.shutdownNow();
+            monitorService.shutdownNow();
+            opService.shutdownNow();
         }
 
         newStash.updateLatestFile();
@@ -276,12 +285,13 @@ public class StashGenerator {
             JavaPairRDD<String, StashLocation> documentsInPriorStash = getDocumentsFromPriorStash(sparkContext, table, priorStashFiles, priorStash);
 
             // Fully join the two to get the set of all documents
-            JavaPairRDD<String, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash);
+            JavaPairRDD<String, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash).persist(StorageLevel.MEMORY_AND_DISK_SER());
 
             // For all documents with any databus updates write them to Stash from databus parquet
             JavaRDD<UUID> unsortedDatabusOutputDocs =
                     allDocuments.filter(t -> t._2._1.isPresent())
-                            .map(t -> t._2._1.get());
+                            .map(t -> t._2._1.get())
+                            .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
             asyncOperations.watchAndThen(unsortedDatabusOutputDocs.countAsync(), count -> {
                 if (count != 0) {
@@ -297,7 +307,8 @@ public class StashGenerator {
             // For all documents from the prior Stash that are not updated write them to Stash
             JavaRDD<StashLocation> unsortedPriorStashOutputDocs = allDocuments
                     .filter(t -> !t._2._1.isPresent())
-                    .map(t -> t._2._2.get());
+                    .map(t -> t._2._2.get())
+                    .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
             asyncOperations.watchAndThen(unsortedPriorStashOutputDocs.countAsync(), count -> {
                 if (count != 0) {
@@ -384,8 +395,7 @@ public class StashGenerator {
                     final Iterator<Tuple2<Integer, DocumentMetadata>> lines = priorStash.readStashTableFileMetadata(table, priorStashFileNames.getValue().get(f));
                     return Iterators.transform(lines, l -> new Tuple2<>(l._2.getDocumentId().getKey(), new StashLocation(f, l._1)));
                 })
-                .reduceByKey((left, right) -> left.compareTo(right) < 0 ? left : right)
-                .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
+                .reduceByKey((left, right) -> left.compareTo(right) < 0 ? left : right);
     }
 
     private Dataset<String> getUpdatedDocumentsFromDatabus(

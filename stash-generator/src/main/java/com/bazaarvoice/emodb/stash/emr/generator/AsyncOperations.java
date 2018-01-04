@@ -1,5 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
+import com.google.common.base.Throwables;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.AbstractFuture;
 import org.apache.spark.api.java.JavaFutureAction;
@@ -8,36 +9,50 @@ import javax.annotation.Nullable;
 import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
+import java.util.stream.Stream;
 
 public class AsyncOperations {
 
     private final static int MAX_BACKOFF = (int) TimeUnit.SECONDS.toMillis(10);
-    
-    private final Set<WatchedFuture<?>> _futures = Collections.synchronizedSet(Sets.newIdentityHashSet());
-    
-    private final ScheduledExecutorService _service;
 
-    public AsyncOperations(ScheduledExecutorService service) {
-        _service = service;
+    private final Set<WatchedFuture<?>> _watchedFutures = Collections.synchronizedSet(Sets.newIdentityHashSet());
+    private final Set<WatchedFuture<?>> _failedFutures = Collections.synchronizedSet(Sets.newIdentityHashSet());
+    private final Semaphore _semaphore;
+    
+    private final ScheduledExecutorService _monitorService;
+    private final ExecutorService _opService;
+
+    public AsyncOperations(ScheduledExecutorService monitorService, ExecutorService opService, int maxAsyncOperations) {
+        _monitorService = monitorService;
+        _opService = opService;
+        _semaphore = new Semaphore(maxAsyncOperations);
     }
 
     public void watch(JavaFutureAction<?> future) {
         watchAndThen(future, null);
     }
 
-    public <T> void watchAndThen(JavaFutureAction<T> future, Op<T> then) {
+    public <T> void watchAndThen(final JavaFutureAction<T> future, final Op<T> then) {
+        // Avoid more than the maximum number of parallel operations simultaneously.  Block until available.
+        try {
+            _semaphore.acquire();
+        } catch (InterruptedException e) {
+            throw Throwables.propagate(e);
+        }
         WatchedFuture<T> watchedFuture = new WatchedFuture<T>(future, then);
-        _futures.add(watchedFuture);
+        _watchedFutures.add(watchedFuture);
         watchedFuture.scheduleNextCheck();
     }
 
     public void awaitAll() throws ExecutionException, InterruptedException {
-        WatchedFuture<?> future = _futures.stream().findFirst().orElse(null);
+        WatchedFuture<?> future = Stream.concat(_failedFutures.stream(), _watchedFutures.stream()).findFirst().orElse(null);
         while (future != null) {
             future.get();
-            future = _futures.stream().findFirst().orElse(null);
+            future =  Stream.concat(_failedFutures.stream(), _watchedFutures.stream()).findFirst().orElse(null);
         }
     }
 
@@ -57,34 +72,37 @@ public class AsyncOperations {
 
         @Override
         public void run() {
-            try {
-                if (_future.isDone()) {
-                    if (_future.isCancelled()) {
-                        if (!isCancelled()) {
-                            cancel(false);
+            if (_future.isDone()) {
+                _semaphore.release();
+                _opService.submit(() -> {
+                    try {
+                        if (_future.isCancelled()) {
+                            if (!isCancelled()) {
+                                cancel(false);
+                            }
+                        } else {
+                            T result = _future.get();
+                            if (_op != null) {
+                                _op.run(result);
+                            }
+                            set(result);
+                            _watchedFutures.remove(this);
                         }
-                    } else {
-                        T result = _future.get();
-                        if (_op != null) {
-                            _op.run(result);
-                        }
-                        set(result);
-                        _futures.remove(this);
+                    } catch (ExecutionException e) {
+                        setException(e.getCause());
+                    } catch (Throwable t) {
+                        setException(t);
                     }
-                } else {
-                    scheduleNextCheck();
-                }
-            } catch (ExecutionException e) {
-                setException(e.getCause());
-            } catch (Throwable t) {
-                setException(t);
+                });
+            } else {
+                scheduleNextCheck();
             }
         }
 
         private void scheduleNextCheck() {
             long backoff = _backoff;
             _backoff = Math.min((int) (backoff * 1.25), MAX_BACKOFF);
-            _service.schedule(this, backoff, TimeUnit.MILLISECONDS);
+            _monitorService.schedule(this, backoff, TimeUnit.MILLISECONDS);
         }
 
         @Override
@@ -92,7 +110,16 @@ public class AsyncOperations {
             if (!_future.isCancelled()) {
                 _future.cancel(mayInterruptIfRunning);
             }
+            _watchedFutures.remove(this);
+            _failedFutures.add(this);
             return super.cancel(mayInterruptIfRunning);
+        }
+
+        @Override
+        protected boolean setException(Throwable throwable) {
+            _watchedFutures.remove(this);
+            _failedFutures.add(this);
+            return super.setException(throwable);
         }
     }
 }
