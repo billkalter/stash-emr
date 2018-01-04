@@ -7,6 +7,7 @@ import org.apache.spark.api.java.JavaFutureAction;
 
 import javax.annotation.Nullable;
 import java.util.Collections;
+import java.util.ConcurrentModificationException;
 import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
@@ -49,10 +50,20 @@ public class AsyncOperations {
     }
 
     public void awaitAll() throws ExecutionException, InterruptedException {
-        WatchedFuture<?> future = Stream.concat(_failedFutures.stream(), _watchedFutures.stream()).findFirst().orElse(null);
-        while (future != null) {
-            future.get();
-            future =  Stream.concat(_failedFutures.stream(), _watchedFutures.stream()).findFirst().orElse(null);
+        boolean doneWaiting = false;
+        while (!doneWaiting) {
+            WatchedFuture<?> future = null;
+            try {
+                future = Stream.concat(_failedFutures.stream(), _watchedFutures.stream()).findFirst().orElse(null);
+                if (future == null) {
+                    doneWaiting = true;
+                }
+            } catch (ConcurrentModificationException e) {
+                // Ok, try again
+            }
+            if (future != null) {
+                future.get();
+            }
         }
     }
 
@@ -110,15 +121,15 @@ public class AsyncOperations {
             if (!_future.isCancelled()) {
                 _future.cancel(mayInterruptIfRunning);
             }
-            _watchedFutures.remove(this);
             _failedFutures.add(this);
+            _watchedFutures.remove(this);
             return super.cancel(mayInterruptIfRunning);
         }
 
         @Override
         protected boolean setException(Throwable throwable) {
-            _watchedFutures.remove(this);
             _failedFutures.add(this);
+            _watchedFutures.remove(this);
             return super.setException(throwable);
         }
     }
