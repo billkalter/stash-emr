@@ -144,15 +144,17 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
     }
 
     @Override
-    public Iterator<Tuple2<Integer, String>> readStashTableFileJson(String table, String file) {
+    public CloseableIterator<Tuple2<Integer, String>> readStashTableFileJson(String table, String file) {
         InputStream inputStream = getFileInputStream(table, file);
-        return countingIterator(readFileLines(inputStream, file));
+        return new DelegateCloseableIterator<>(countingIterator(readFileLines(inputStream, file)), inputStream);
     }
 
     @Override
-    public Iterator<Tuple2<Integer, DocumentMetadata>> readStashTableFileMetadata(String table, String file) {
+    public CloseableIterator<Tuple2<Integer, DocumentMetadata>> readStashTableFileMetadata(String table, String file) {
         InputStream inputStream = getFileInputStream(table, file);
-        return countingIterator(Iterators.transform(readFileLines(inputStream, file), line -> parseJson(line, DocumentMetadata.class)));
+        return new DelegateCloseableIterator<>(
+                countingIterator(Iterators.transform(readFileLines(inputStream, file), line -> parseJson(line, DocumentMetadata.class))),
+                inputStream);
     }
 
     private static class S3StashIO extends StashIO {

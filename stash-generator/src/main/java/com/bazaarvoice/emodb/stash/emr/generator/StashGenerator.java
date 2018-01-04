@@ -1,6 +1,7 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
+import com.bazaarvoice.emodb.stash.emr.generator.io.CloseableIterator;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashFileWriter;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashIO;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashReader;
@@ -15,6 +16,7 @@ import com.google.common.collect.ImmutableList;
 import com.google.common.collect.Iterators;
 import com.google.common.collect.Lists;
 import com.google.common.hash.Hashing;
+import com.google.common.io.Closeables;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.impl.action.StoreTrueArgumentAction;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
@@ -448,7 +450,7 @@ public class StashGenerator {
             StashLocation loc = iter.next();
             int currentFileIndex = loc.getFileIndex();
             int currentLineNum = loc.getLine();
-            Iterator<Tuple2<Integer, String>> stashFileJson = stashReader.readStashTableFileJson(table, fileNames.getValue().get(currentFileIndex));
+            CloseableIterator<Tuple2<Integer, String>> stashFileJson = stashReader.readStashTableFileJson(table, fileNames.getValue().get(currentFileIndex));
 
             // Move to the first line
             String jsonLine = forwardToLine(stashFileJson, currentLineNum);
@@ -463,6 +465,7 @@ public class StashGenerator {
                 while (iter.hasNext()) {
                     loc = iter.next();
                     if (loc.getFileIndex() != currentFileIndex) {
+                        Closeables.close(stashFileJson, true);
                         currentFileIndex = loc.getFileIndex();
                         stashFileJson = stashReader.readStashTableFileJson(table, fileNames.getValue().get(currentFileIndex));
                     }
@@ -470,6 +473,8 @@ public class StashGenerator {
                     jsonLine = forwardToLine(stashFileJson, currentLineNum);
                     tableWriter.writeJsonLine(jsonLine);
                 }
+
+                Closeables.close(stashFileJson, true);
             } catch (IOException e) {
                 throw Throwables.propagate(e);
             }
