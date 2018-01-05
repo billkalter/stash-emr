@@ -54,6 +54,7 @@ import java.time.ZoneOffset;
 import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -61,6 +62,7 @@ import java.util.UUID;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.stream.Collectors;
 
 import static com.bazaarvoice.emodb.stash.emr.generator.TableStatus.NA;
 import static com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema.toPollTime;
@@ -273,6 +275,7 @@ public class StashGenerator {
                                                 final AsyncOperations asyncOperations,
                                                 final BroadcastRegistry broadcastRegistry) {
 
+        // Get all tables which will be merged and assign each a unique integer ID.
         Broadcast<BiMap<String, Integer>> allTables;
         {
             Map<String, Integer> allTablesLocal = Maps.newHashMap();
@@ -286,25 +289,31 @@ public class StashGenerator {
         JavaRDD<Integer> tableIndexRDD = tablesRDD
                 .map(table -> allTables.getValue().get(table));
 
-        JavaPairRDD<StashFile, String> priorStashFilesRDD = tableIndexRDD
-                .flatMapToPair(tableIndex -> {
-                    int fileIndex = 0;
-                    List<String> tableNames = priorStash.getTableFilesFromStash(allTables.getValue().inverse().get(tableIndex));
-                    List<Tuple2<StashFile, String>> tuples = Lists.newArrayListWithCapacity(tableNames.size());
-                    for (String tableName : tableNames) {
-                        tuples.add(new Tuple2<>(new StashFile(tableIndex, fileIndex++), tableName));
-                    }
-                    return tuples.iterator();
-                });
+        // Get all files which will be read from the prior Stash.  Use a temporary RDD to parallize reading the
+        // numerous Stash tables.
+        Broadcast<Map<StashFile, String>> priorStashFiles;
+        {
+            JavaPairRDD<StashFile, String> priorStashFilesRDD = tableIndexRDD
+                    .flatMapToPair(tableIndex -> {
+                        int fileIndex = 0;
+                        List<String> tableNames = priorStash.getTableFilesFromStash(allTables.getValue().inverse().get(tableIndex));
+                        List<Tuple2<StashFile, String>> tuples = Lists.newArrayListWithCapacity(tableNames.size());
+                        for (String tableName : tableNames) {
+                            tuples.add(new Tuple2<>(new StashFile(tableIndex, fileIndex++), tableName));
+                        }
+                        return tuples.iterator();
+                    });
 
-        Broadcast<Map<StashFile, String>> priorStashFiles = broadcastRegistry.register(
-                sparkContext.broadcast(priorStashFilesRDD.collectAsMap()));
-        
+            priorStashFiles = broadcastRegistry.register(sparkContext.broadcast(priorStashFilesRDD.collectAsMap()));
+
+            priorStashFilesRDD.unpersist(false);
+        }
+
         // Get all documents that exist in Databus
         JavaPairRDD<StashDocument, UUID> documentsInDatabus = getDocumentsWithDatabusUpdate(sqlContext, databusSource, priorStashTime, stashTime, allTables);
 
         // Get all documents that exist in the prior Stash
-        JavaPairRDD<StashDocument, StashLocation> documentsInPriorStash = getDocumentsFromPriorStash(priorStashFilesRDD, priorStash, allTables);
+        JavaPairRDD<StashDocument, StashLocation> documentsInPriorStash = getDocumentsFromPriorStash(sparkContext, priorStashFiles, priorStash, allTables);
 
         // Fully join the two to get the set of all documents
         JavaPairRDD<StashDocument, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash)
@@ -391,10 +400,19 @@ public class StashGenerator {
     }
 
     private JavaPairRDD<StashDocument, StashLocation> getDocumentsFromPriorStash(
-            final JavaPairRDD<StashFile, String> priorStashFilesRDD,
+            final JavaSparkContext context, final Broadcast<Map<StashFile, String>> priorStashFiles,
             final StashReader priorStash, final Broadcast<BiMap<String, Integer>> allTables) {
 
-        return priorStashFilesRDD
+        List<Tuple2<StashFile, String>> priorStashFileShuffled = priorStashFiles.getValue()
+                .entrySet()
+                .stream()
+                .map(entry -> new Tuple2<>(entry.getKey(), entry.getValue()))
+                .collect(Collectors.toList());
+
+        Collections.shuffle(priorStashFileShuffled);
+        
+        return context
+                .parallelizePairs(priorStashFileShuffled, (int) Math.ceil((float) priorStashFileShuffled.size() / 10))
                 .flatMapToPair(t -> {
                     final Iterator<Tuple2<Integer, DocumentMetadata>> lines =
                             priorStash.readStashTableFileMetadata(allTables.getValue().inverse().get(t._1.getTableIndex()), t._2);

@@ -311,7 +311,7 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
             objectMetadata.setContentType("application/text");
             objectMetadata.setContentLength(content.length);
 
-            _s3.putObject(new PutObjectRequest(_bucket, key, new ByteArrayInputStream(content), objectMetadata));
+            s3().putObject(new PutObjectRequest(_bucket, key, new ByteArrayInputStream(content), objectMetadata));
         }
     }
 
