@@ -226,18 +226,20 @@ public class StashGenerator {
 
         ScheduledExecutorService monitorService = Executors.newScheduledThreadPool(2);
         ExecutorService opService = Executors.newCachedThreadPool();
+        BroadcastRegistry broadcastRegistry = new BroadcastRegistry();
         try {
             AsyncOperations asyncOperations = new AsyncOperations(monitorService, opService, maxAsyncOperations);
 
             copyExistingStashTables(unmodifiedTables, priorStash, newStash, asyncOperations);
 
             copyAndMergeUpdatedStashTables(context, sqlContext, mergeTables, databusSource, priorStash, newStash,
-                    priorStashTime, stashTime, partitionSize, asyncOperations);
+                    priorStashTime, stashTime, partitionSize, asyncOperations, broadcastRegistry);
 
             asyncOperations.awaitAll();
         } finally {
             monitorService.shutdownNow();
             opService.shutdownNow();
+            broadcastRegistry.destroyAll();
         }
 
         newStash.updateLatestFile();
@@ -268,7 +270,8 @@ public class StashGenerator {
                                                 final StashReader priorStash, final StashWriter newStash,
                                                 final ZonedDateTime priorStashTime, final ZonedDateTime stashTime,
                                                 final int partitionSize,
-                                                final AsyncOperations asyncOperations) {
+                                                final AsyncOperations asyncOperations,
+                                                final BroadcastRegistry broadcastRegistry) {
 
         Broadcast<BiMap<String, Integer>> allTables;
         {
@@ -277,7 +280,7 @@ public class StashGenerator {
             for (String table : tablesRDD.collect()) {
                 allTablesLocal.put(table, tableIndex++);
             }
-            allTables = sparkContext.broadcast(ImmutableBiMap.copyOf(allTablesLocal));
+            allTables = broadcastRegistry.register(sparkContext.broadcast(ImmutableBiMap.copyOf(allTablesLocal)));
         }
 
         JavaRDD<Integer> tableIndexRDD = tablesRDD
@@ -294,7 +297,8 @@ public class StashGenerator {
                     return tuples.iterator();
                 });
 
-        Broadcast<Map<StashFile, String>> priorStashFiles = sparkContext.broadcast(priorStashFilesRDD.collectAsMap());
+        Broadcast<Map<StashFile, String>> priorStashFiles = broadcastRegistry.register(
+                sparkContext.broadcast(priorStashFilesRDD.collectAsMap()));
         
         // Get all documents that exist in Databus
         JavaPairRDD<StashDocument, UUID> documentsInDatabus = getDocumentsWithDatabusUpdate(sqlContext, databusSource, priorStashTime, stashTime, allTables);
