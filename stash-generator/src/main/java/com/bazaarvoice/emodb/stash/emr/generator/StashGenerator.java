@@ -37,6 +37,7 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.expressions.GenericRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.storage.StorageLevel;
+import org.apache.spark.util.LongAccumulator;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import scala.Tuple2;
@@ -317,35 +318,43 @@ public class StashGenerator {
         JavaPairRDD<StashDocument, Tuple2<Optional<UUID>, Optional<StashLocation>>> allDocuments = documentsInDatabus.fullOuterJoin(documentsInPriorStash)
                 .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
-        // For all documents with any databus updates write them to Stash from databus parquet
-        JavaRDD<TableAndValue<UUID>> unsortedDatabusOutputDocs =
-                allDocuments.filter(t -> t._2._1.isPresent())
-                        .map(t -> new TableAndValue<>(t._1.getTableIndex(), t._2._1.get()))
-                        .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
+        // Get the number of documents from databus and prior stash which will be written
+        LongAccumulator unsortedDatabusOutputDocCount = new LongAccumulator();
+        LongAccumulator unsortedPriorStashOutputDocCount = new LongAccumulator();
+        sparkContext.sc().register(unsortedDatabusOutputDocCount);
+        sparkContext.sc().register(unsortedPriorStashOutputDocCount);
 
-        asyncOperations.watchAndThen(unsortedDatabusOutputDocs.countAsync(), unsortedDatabusOutputDocCount -> {
-            if (unsortedDatabusOutputDocCount != 0) {
-                asyncOperations.watch(
-                        getUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime, allTables)
-                                .sortBy(t -> t, true, (int) Math.ceil((float) unsortedDatabusOutputDocCount / partitionSize))
-                                .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash, allTables)));
+        allDocuments.foreach(t -> {
+            if (t._2._1.isPresent()) {
+                unsortedDatabusOutputDocCount.add(1);
+            } else {
+                unsortedPriorStashOutputDocCount.add(1);
             }
         });
 
-        // For all documents from the prior Stash that are not updated write them to Stash
-        JavaRDD<TableAndValue<StashLocation>> unsortedPriorStashOutputDocs = allDocuments
-                .filter(t -> !t._2._1.isPresent())
-                .map(t -> new TableAndValue<>(t._1.getTableIndex(), t._2._2.get()))
-                .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
+        if (unsortedDatabusOutputDocCount.sum() != 0) {
+            // For all documents with any databus updates write them to Stash from databus parquet
+            JavaRDD<TableAndValue<UUID>> unsortedDatabusOutputDocs = allDocuments
+                    .filter(t -> t._2._1.isPresent())
+                    .map(t -> new TableAndValue<>(t._1.getTableIndex(), t._2._1.get()));
 
-        asyncOperations.watchAndThen(unsortedPriorStashOutputDocs.countAsync(), unsortedPriorStashOutputDocCount -> {
-            if (unsortedPriorStashOutputDocCount != 0) {
-                asyncOperations.watch(
-                        unsortedPriorStashOutputDocs
-                                .sortBy(t -> t, true, (int) Math.ceil((float) unsortedPriorStashOutputDocCount / partitionSize))
-                                .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, priorStash, newStash, allTables, priorStashFiles)));
-            }
-        });
+            asyncOperations.watch(
+                    getUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime, allTables)
+                            .sortBy(t -> t, true, (int) Math.ceil((float) unsortedDatabusOutputDocCount.sum() / partitionSize))
+                            .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash, allTables)));
+        }
+
+        if (unsortedPriorStashOutputDocCount.sum() != 0) {
+            // For all documents from the prior Stash that are not updated write them to Stash
+            JavaRDD<TableAndValue<StashLocation>> unsortedPriorStashOutputDocs = allDocuments
+                    .filter(t -> !t._2._1.isPresent())
+                    .map(t -> new TableAndValue<>(t._1.getTableIndex(), t._2._2.get()));
+
+            asyncOperations.watch(
+                    unsortedPriorStashOutputDocs
+                            .sortBy(t -> t, true, (int) Math.ceil((float) unsortedPriorStashOutputDocCount.sum() / partitionSize))
+                            .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, priorStash, newStash, allTables, priorStashFiles)));
+        }
     }
 
     private JavaRDD<String> getAllEmoTables(JavaSparkContext context, DataStore dataStore, Optional<String> existingTablesFile) {
