@@ -325,13 +325,14 @@ public class StashGenerator {
                         .map(t -> new TableAndValue<>(t._1.getTableIndex(), t._2._1.get()))
                         .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
-        long unsortedDatabusOutputDocCount = unsortedDatabusOutputDocs.countApproxDistinct(0.05);
-
-        JavaFutureAction<Void> future = getUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime, allTables)
-                .sortBy(t -> t, true, (int) Math.ceil((float) unsortedDatabusOutputDocCount / partitionSize))
-                .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash, allTables));
-
-        asyncOperations.watch(future);
+        asyncOperations.watchAndThen(unsortedDatabusOutputDocs.countAsync(), unsortedDatabusOutputDocCount -> {
+            if (unsortedDatabusOutputDocCount != 0) {
+                asyncOperations.watch(
+                        getUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime, allTables)
+                                .sortBy(t -> t, true, (int) Math.ceil((float) unsortedDatabusOutputDocCount / partitionSize))
+                                .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash, allTables)));
+            }
+        });
 
         // For all documents from the prior Stash that are not updated write them to Stash
         JavaRDD<TableAndValue<StashLocation>> unsortedPriorStashOutputDocs = allDocuments
@@ -339,13 +340,14 @@ public class StashGenerator {
                 .map(t -> new TableAndValue<>(t._1.getTableIndex(), t._2._2.get()))
                 .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
-        long unsortedPriorStashOutputDocCount = unsortedPriorStashOutputDocs.countApproxDistinct(0.05);
-
-        future = unsortedPriorStashOutputDocs
-                .sortBy(t -> t, true, (int) Math.ceil((float) unsortedPriorStashOutputDocCount / partitionSize))
-                .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, priorStash, newStash, allTables, priorStashFiles));
-
-        asyncOperations.watch(future);
+        asyncOperations.watchAndThen(unsortedPriorStashOutputDocs.countAsync(), unsortedPriorStashOutputDocCount -> {
+            if (unsortedPriorStashOutputDocCount != 0) {
+                asyncOperations.watch(
+                        unsortedPriorStashOutputDocs
+                                .sortBy(t -> t, true, (int) Math.ceil((float) unsortedPriorStashOutputDocCount / partitionSize))
+                                .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, priorStash, newStash, allTables, priorStashFiles)));
+            }
+        });
     }
 
     private JavaRDD<String> getAllEmoTables(JavaSparkContext context, DataStore dataStore, Optional<String> existingTablesFile) {
