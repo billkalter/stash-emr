@@ -307,30 +307,28 @@ public class StashGenerator {
                 .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
         // For all documents with any databus updates write them to Stash from databus parquet
-        JavaPairRDD<Integer, UUID> unsortedDatabusOutputDocs =
+        JavaRDD<TableAndValue<UUID>> unsortedDatabusOutputDocs =
                 allDocuments.filter(t -> t._2._1.isPresent())
-                        .mapToPair(t -> new Tuple2<>(t._1.getTableIndex(), t._2._1.get()))
+                        .map(t -> new TableAndValue<>(t._1.getTableIndex(), t._2._1.get()))
                         .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
         long unsortedDatabusOutputDocCount = unsortedDatabusOutputDocs.countApproxDistinct(0.05);
 
         JavaFutureAction<Void> future = getUpdatedDocumentsFromDatabus(unsortedDatabusOutputDocs, sqlContext, databusSource, priorStashTime, stashTime, allTables)
-                .map(t -> new TableAndValue<>(t._1, t._2))
                 .sortBy(t -> t, true, (int) Math.ceil((float) unsortedDatabusOutputDocCount / partitionSize))
                 .foreachPartitionAsync(iter -> writeDatabusPartitionToStash(iter, newStash, allTables));
 
         asyncOperations.watch(future);
 
         // For all documents from the prior Stash that are not updated write them to Stash
-        JavaPairRDD<Integer, StashLocation> unsortedPriorStashOutputDocs = allDocuments
+        JavaRDD<TableAndValue<StashLocation>> unsortedPriorStashOutputDocs = allDocuments
                 .filter(t -> !t._2._1.isPresent())
-                .mapToPair(t -> new Tuple2<>(t._1.getTableIndex(), t._2._2.get()))
+                .map(t -> new TableAndValue<>(t._1.getTableIndex(), t._2._2.get()))
                 .persist(StorageLevel.MEMORY_AND_DISK_SER_2());
 
         long unsortedPriorStashOutputDocCount = unsortedPriorStashOutputDocs.countApproxDistinct(0.05);
 
         future = unsortedPriorStashOutputDocs
-                .map(t -> new TableAndValue<>(t._1, t._2))
                 .sortBy(t -> t, true, (int) Math.ceil((float) unsortedPriorStashOutputDocCount / partitionSize))
                 .foreachPartitionAsync(iter -> writePriorStashPartitionToStash(iter, priorStash, newStash, allTables, priorStashFiles));
 
@@ -401,12 +399,12 @@ public class StashGenerator {
                 .reduceByKey((left, right) -> left.compareTo(right) < 0 ? left : right);
     }
 
-    private JavaPairRDD<Integer, String> getUpdatedDocumentsFromDatabus(
-            JavaPairRDD<Integer, UUID> updateIdByTables, SQLContext sqlContext, String databusSource, ZonedDateTime priorStashTime,
+    private JavaRDD<TableAndValue<String>> getUpdatedDocumentsFromDatabus(
+            JavaRDD<TableAndValue<UUID>> updateIdByTables, SQLContext sqlContext, String databusSource, ZonedDateTime priorStashTime,
             ZonedDateTime stashTime, Broadcast<BiMap<String, Integer>> allTables) {
 
         JavaRDD<Row> rows = updateIdByTables
-                .map(t -> new GenericRow(new Object[] { allTables.getValue().inverse().get(t._1), t._2.toString() }));
+                .map(t -> new GenericRow(new Object[] { allTables.getValue().inverse().get(t.getTableIndex()), t.getValue().toString() }));
 
         final Dataset<Row> updatedIdsDataset =  sqlContext.createDataFrame(rows, DataTypes.createStructType(
                 ImmutableList.of(
@@ -428,7 +426,7 @@ public class StashGenerator {
                 .where(joinedDocsDataset.col(DocumentSchema.POLL_DATE).isin(pollDates)
                         .and(joinedDocsDataset.col(DocumentSchema.DELETED).equalTo(false)))
                 .toJavaRDD()
-                .mapToPair(row -> new Tuple2<>(allTables.getValue().get(row.getString(0)), row.getString(1)));
+                .map(row -> new TableAndValue<>(allTables.getValue().get(row.getString(0)), row.getString(1)));
     }
 
     private Seq<Object> getPollDates(ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
