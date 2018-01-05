@@ -24,7 +24,6 @@ import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.impl.action.StoreTrueArgumentAction;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
-import org.apache.spark.api.java.JavaFutureAction;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
 import org.apache.spark.api.java.JavaSparkContext;
@@ -257,11 +256,10 @@ public class StashGenerator {
 
         asyncOperations.watchAndThen(tableFiles.countAsync(), count -> {
             if (count != 0) {
-                JavaFutureAction<Void> future = tableFiles
-                        .repartition((int) Math.ceil((float) count / 20))
-                        .foreachAsync(t -> priorStash.copyTableFile(newStash, t._1, t._2));
-
-                asyncOperations.watch(future);
+                asyncOperations.watch(
+                        tableFiles
+                                .repartition((int) Math.ceil((float) count / 20))
+                                .foreachAsync(t -> priorStash.copyTableFile(newStash, t._1, t._2)));
             }
         });
     }
