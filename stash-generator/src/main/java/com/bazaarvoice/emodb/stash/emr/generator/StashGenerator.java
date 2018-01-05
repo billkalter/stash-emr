@@ -24,7 +24,6 @@ import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.impl.action.StoreTrueArgumentAction;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
-import org.apache.spark.SparkConf;
 import org.apache.spark.api.java.JavaFutureAction;
 import org.apache.spark.api.java.JavaPairRDD;
 import org.apache.spark.api.java.JavaRDD;
@@ -35,6 +34,7 @@ import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Encoders;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.catalyst.expressions.GenericRow;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.storage.StorageLevel;
@@ -45,7 +45,6 @@ import scala.collection.Seq;
 import scala.collection.Seq$;
 import scala.collection.mutable.Builder;
 
-import javax.annotation.Nullable;
 import javax.ws.rs.core.UriBuilder;
 import java.io.IOException;
 import java.net.URI;
@@ -103,6 +102,7 @@ public class StashGenerator {
         argParser.addArgument("--emoUrl")
                 .help("EmoDB URL (if using direct EmoDB access)");
         argParser.addArgument("--master")
+                .required(true)
                 .help("Spark master URL");
         argParser.addArgument("--region")
                 .help("Region where S3 bucket is located if 'stashRoot' is in S3. (default is EC2 host's region)");
@@ -162,16 +162,16 @@ public class StashGenerator {
 
     public void runStashGenerator(final DataStore dataStore, final String databusSource, final URI stashRoot,
                                   final URI outputStashRoot,
-                                  final ZonedDateTime stashTime, @Nullable final String master,
+                                  final ZonedDateTime stashTime, final String master,
                                   Optional<String> region, Optional<String> existingTablesFile,
                                   boolean optimizeUnmodifiedTables, int partitionSize, int maxAsyncOperations) throws Exception {
 
-        SparkConf sparkConf = new SparkConf().setAppName("StashGenerator");
-        if (master != null) {
-            sparkConf.setMaster(master);
-        }
+        SparkSession sparkSession = SparkSession.builder()
+                .appName("StashGenerator")
+                .master(master)
+                .getOrCreate();
 
-        JavaSparkContext context = new JavaSparkContext(sparkConf);
+        JavaSparkContext context = new JavaSparkContext(sparkSession.sparkContext());
         SQLContext sqlContext = SQLContext.getOrCreate(context.sc());
         StashReader priorStash = StashIO.getLatestStash(stashRoot, region);
         ZonedDateTime priorStashTime = STASH_DIR_FORMAT.parse(priorStash.getStashDirectory(), ZonedDateTime::from);
