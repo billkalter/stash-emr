@@ -7,7 +7,7 @@ import net.jpountz.lz4.LZ4Factory;
 
 import java.util.Arrays;
 
-abstract class ContentEncoder {
+public abstract class ContentEncoder {
 
     abstract public byte[] fromJson(String json);
 

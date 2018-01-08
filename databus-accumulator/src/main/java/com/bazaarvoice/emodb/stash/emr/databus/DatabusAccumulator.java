@@ -1,5 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.databus;
 
+import com.bazaarvoice.emodb.stash.emr.ContentEncoding;
 import com.bazaarvoice.emodb.stash.emr.DocumentId;
 import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
 import net.sourceforge.argparse4j.ArgumentParsers;
@@ -117,7 +118,8 @@ public class DatabusAccumulator implements Serializable {
         dedupEvents.foreachRDD((rdd, time) -> {
             SQLContext sqlContext = SQLContext.getOrCreate(rdd.context());
             Dataset<Row> dataFrame = sqlContext.createDataFrame(
-                    rdd.values().map(event -> toRow(event.getUpdateId(), event.getDocumentMetadata(), event.getJson(),
+                    rdd.values().map(event -> toRow(event.getUpdateId(), event.getDocumentMetadata(),
+                            ContentEncoding.LZ4, event.getJson(),
                             ZonedDateTime.ofInstant(Instant.ofEpochMilli(time.milliseconds()), ZoneOffset.UTC))),
                     DocumentSchema.SCHEMA);
 

@@ -1,5 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
+import com.bazaarvoice.emodb.stash.emr.ContentEncoding;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.bazaarvoice.emodb.stash.emr.generator.io.CloseableIterator;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashFileWriter;
@@ -430,7 +431,7 @@ public class StashGenerator {
                 .reduceByKey((left, right) -> left.compareTo(right) < 0 ? left : right);
     }
 
-    private JavaRDD<TableAndValue<String>> getUpdatedDocumentsFromDatabus(
+    private JavaRDD<TableAndValue<EncodedStashLine>> getUpdatedDocumentsFromDatabus(
             JavaRDD<TableAndValue<UUID>> updateIdByTables, SQLContext sqlContext, String databusSource, ZonedDateTime priorStashTime,
             ZonedDateTime stashTime, Broadcast<BiMap<String, Integer>> allTables) {
 
@@ -453,11 +454,11 @@ public class StashGenerator {
         Dataset<Row> joinedDocsDataset =  allDocsDataset.as("a").join(updatedIdsDataset.as("u"), joinColumns);
 
         return joinedDocsDataset
-                .select(DocumentSchema.TABLE, DocumentSchema.JSON)
+                .select(DocumentSchema.TABLE, DocumentSchema.ENCODING, DocumentSchema.CONTENT)
                 .where(joinedDocsDataset.col(DocumentSchema.POLL_DATE).isin(pollDates)
                         .and(joinedDocsDataset.col(DocumentSchema.DELETED).equalTo(false)))
                 .toJavaRDD()
-                .map(row -> new TableAndValue<>(allTables.getValue().get(row.getString(0)), row.getString(1)));
+                .map(row -> new TableAndValue<>(allTables.getValue().get(row.getString(0)), new EncodedStashLine(row.getInt(1), row.getAs(2))));
     }
 
     private Seq<Object> getPollDates(ZonedDateTime priorStashTime, ZonedDateTime stashTime) {
@@ -473,16 +474,17 @@ public class StashGenerator {
         return pollDates.result();
     }
 
-    private static void writeDatabusPartitionToStash(Iterator<TableAndValue<String>> iter, StashWriter stashWriter,
+    private static void writeDatabusPartitionToStash(Iterator<TableAndValue<EncodedStashLine>> iter, StashWriter stashWriter,
                                                      Broadcast<BiMap<String, Integer>> allTables) {
         StashFileWriter tableWriter = null;
         int lastTableIndex = Integer.MIN_VALUE;
 
         try {
             while (iter.hasNext()) {
-                TableAndValue<String> tableAndValue = iter.next();
+                TableAndValue<EncodedStashLine> tableAndValue = iter.next();
                 int tableIndex = tableAndValue.getTableIndex();
-                String jsonLine = tableAndValue.getValue();
+                EncodedStashLine encodedStashLine = tableAndValue.getValue();
+                String jsonLine = ContentEncoding.fromCode(encodedStashLine.getEncoding()).getEncoder().toJson(encodedStashLine.getContent());
 
                 if (tableIndex != lastTableIndex) {
                     if (tableWriter != null) {

@@ -14,12 +14,15 @@ public enum ContentEncoding {
     }
 
     public static ContentEncoding fromCode(int code) {
-        for (ContentEncoding encoding : ContentEncoding.values()) {
-            if (encoding._code == code) {
-                return encoding;
-            }
+        // Faster to implement a switch on the known codes than to cycle through each value to find the matching code
+        switch (code) {
+            case 0:
+                return TEXT;
+            case 1:
+                return LZ4;
+            default:
+                throw new IllegalArgumentException("Unsupported code");
         }
-        throw new IllegalArgumentException("Unsupported code");
     }
 
     public int getCode() {

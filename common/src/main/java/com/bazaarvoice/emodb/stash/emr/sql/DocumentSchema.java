@@ -1,5 +1,6 @@
 package com.bazaarvoice.emodb.stash.emr.sql;
 
+import com.bazaarvoice.emodb.stash.emr.ContentEncoding;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.google.common.collect.ImmutableList;
 import org.apache.spark.sql.Row;
@@ -22,7 +23,8 @@ public class DocumentSchema {
     public static final String VERSION = "version";
     public static final String LAST_UPDATE_TS = "lastUpdateTs";
     public static final String DELETED = "deleted";
-    public static final String JSON = "json";
+    public static final String ENCODING = "encoding";
+    public static final String CONTENT = "content";
     public static final String POLL_DATE = "pollDate";
 
     public static final StructType SCHEMA = DataTypes.createStructType(
@@ -33,11 +35,12 @@ public class DocumentSchema {
                     .add(DataTypes.createStructField(VERSION, DataTypes.LongType, false))
                     .add(DataTypes.createStructField(LAST_UPDATE_TS, DataTypes.LongType, false))
                     .add(DataTypes.createStructField(DELETED, DataTypes.BooleanType, false))
-                    .add(DataTypes.createStructField(JSON, DataTypes.StringType, false))
+                    .add(DataTypes.createStructField(ENCODING, DataTypes.IntegerType, false))
+                    .add(DataTypes.createStructField(CONTENT, DataTypes.BinaryType, false))
                     .add(DataTypes.createStructField(POLL_DATE, DataTypes.StringType, false))
                     .build());
 
-    public static Row toRow(UUID id, DocumentMetadata metadata, String json, ZonedDateTime pollTime) {
+    public static Row toRow(UUID id, DocumentMetadata metadata, ContentEncoding encoding, String json, ZonedDateTime pollTime) {
         return new GenericRow(new Object[] {
                 id.toString(),
                 metadata.getDocumentId().getTable(),
@@ -45,7 +48,8 @@ public class DocumentSchema {
                 metadata.getDocumentVersion().getVersion(),
                 metadata.getDocumentVersion().getLastUpdateTs(),
                 metadata.isDeleted(),
-                metadata.isDeleted() ? null : json,
+                encoding.getCode(),
+                metadata.isDeleted() ? null : encoding.getEncoder().fromJson(json),
                 toPollTime(pollTime)
         });
     }
