@@ -5,12 +5,13 @@ import com.bazaarvoice.emodb.stash.emr.sql.DocumentSchema;
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.Namespace;
-import org.apache.spark.SparkConf;
+import org.apache.spark.api.java.JavaSparkContext;
 import org.apache.spark.broadcast.Broadcast;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.SQLContext;
 import org.apache.spark.sql.SaveMode;
+import org.apache.spark.sql.SparkSession;
 import org.apache.spark.streaming.Duration;
 import org.apache.spark.streaming.Durations;
 import org.apache.spark.streaming.api.java.JavaDStream;
@@ -96,12 +97,13 @@ public class DatabusAccumulator implements Serializable {
     public void runAccumulator(final DatabusReceiver databusReceiver, final String destination,
                                @Nullable final String master, Duration batchInterval) throws InterruptedException {
 
-        SparkConf sparkConf = new SparkConf().setAppName("DatabusAccumulator");
-        if (master != null) {
-            sparkConf.setMaster(master);
-        }
+        SparkSession sparkSession = SparkSession.builder()
+                .appName("DatabusAccumulator")
+                .master(master)
+                .getOrCreate();
 
-        JavaStreamingContext streamingContext = new JavaStreamingContext(sparkConf, batchInterval);
+        JavaSparkContext sparkContext = new JavaSparkContext(sparkSession.sparkContext());
+        JavaStreamingContext streamingContext = new JavaStreamingContext(sparkContext, batchInterval);
         Broadcast<String> broadcastDestination = streamingContext.sparkContext().broadcast(destination);
 
         JavaDStream<DatabusEvent> eventStream = streamingContext.receiverStream(databusReceiver);
