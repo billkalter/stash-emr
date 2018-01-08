@@ -8,6 +8,10 @@ import com.google.common.base.Objects;
 
 import java.io.Serializable;
 
+/**
+ * Basic metadata about a document in EmoDB.  Specifically, the subset of intrinsics required to efficiently store,
+ * query, and build Stash data without needing to re-parse them from the original JSON document.
+ */
 @JsonDeserialize(using = DocumentMetadataDeserializer.class)
 public class DocumentMetadata implements Serializable {
 

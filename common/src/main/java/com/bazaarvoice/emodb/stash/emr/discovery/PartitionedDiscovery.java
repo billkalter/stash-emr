@@ -11,6 +11,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.NavigableMap;
 
+/**
+ * Service discovery implementation which directs requests to a spectific host based on a partition key.  The algorithm
+ * comes directly from EmoDB and Ostrich.
+ */
 public class PartitionedDiscovery extends EmoServiceDiscovery {
 
     private final int _partitionHash;

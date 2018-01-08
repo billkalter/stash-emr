@@ -14,6 +14,9 @@ import com.google.common.collect.AbstractIterator;
 import com.google.common.collect.Iterators;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.Service;
+import org.apache.hadoop.io.retry.RetryPolicies;
+import org.apache.hadoop.io.retry.RetryPolicy;
+import org.apache.hadoop.io.retry.RetryProxy;
 import org.apache.http.HttpStatus;
 import org.glassfish.jersey.client.ClientConfig;
 import org.glassfish.jersey.client.ClientProperties;
@@ -22,6 +25,7 @@ import org.glassfish.jersey.client.JerseyClientBuilder;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import javax.annotation.Nullable;
 import javax.ws.rs.core.MediaType;
 import javax.ws.rs.core.Response;
 import javax.ws.rs.core.UriBuilder;
@@ -51,7 +55,49 @@ public class DataStore implements Serializable, Closeable {
         _apiKey = apiKey;
     }
 
+    private interface IDataStoreClient {
+        List<TableEntry> getTableEntries(@Nullable String from) throws Exception;
+    }
+
+    private class DataStoreClient implements IDataStoreClient {
+        @Override
+        public List<TableEntry> getTableEntries(@Nullable String from) throws Exception {
+            Response response = null;
+            try {
+                UriBuilder uriBuilder = UriBuilder.fromUri(getDataStoreDiscovery().getBaseUri())
+                        .path("sor")
+                        .path("1")
+                        .path("_table")
+                        .queryParam("limit", 100);
+
+                if (from != null) {
+                    uriBuilder = uriBuilder.queryParam("from", from);
+                }
+
+                response = _client.target(uriBuilder.build()).request()
+                        .accept(MediaType.APPLICATION_JSON_TYPE)
+                        .header("X-BV-API-Key", _apiKey)
+                        .get();
+
+                if (response.getStatus() != HttpStatus.SC_OK) {
+                    _log.error("Failed to read table names from DataStore: status={}, message={}",
+                            response.getStatus(), response.readEntity(String.class));
+                    throw new IOException("Failed to read table names");
+                }
+
+                return parseJson(response.readEntity(String.class), _tableEntriesType);
+            } finally {
+                if (response != null) {
+                    response.close();
+                }
+            }
+        }
+    }
+
     public Iterator<String> getTableNames() {
+        RetryPolicy retryPolicy = RetryPolicies.exponentialBackoffRetry(15, 100, TimeUnit.MILLISECONDS);
+        final IDataStoreClient dataStore = (IDataStoreClient) RetryProxy.create(IDataStoreClient.class, new DataStoreClient(), retryPolicy);
+
         return new AbstractIterator<String>() {
             private Iterator<String> _batch = Iterators.emptyIterator();
             private String _from = null;
@@ -59,31 +105,8 @@ public class DataStore implements Serializable, Closeable {
             @Override
             protected String computeNext() {
                 if (!_batch.hasNext()) {
-                    Response response = null;
                     try {
-                        UriBuilder uriBuilder = UriBuilder.fromUri(getDataStoreDiscovery().getBaseUri())
-                                .path("sor")
-                                .path("1")
-                                .path("_table")
-                                .queryParam("limit", 100);
-
-                        if (_from != null) {
-                            uriBuilder = uriBuilder.queryParam("from", _from);
-                        }
-
-                        response = _client.target(uriBuilder.build()).request()
-                                .accept(MediaType.APPLICATION_JSON_TYPE)
-                                .header("X-BV-API-Key", _apiKey)
-                                .get();
-
-                        if (response.getStatus() != HttpStatus.SC_OK) {
-                            _log.error("Failed to read table names from DataStore: status={}, message={}",
-                                    response.getStatus(), response.readEntity(String.class));
-                            throw new IOException("Failed to read table names");
-                        }
-
-                        List<TableEntry> tableEntries = parseJson(response.readEntity(String.class), _tableEntriesType);
-
+                        List<TableEntry> tableEntries = dataStore.getTableEntries(_from);
                         if (tableEntries.isEmpty()) {
                             return endOfData();
                         }
@@ -94,12 +117,8 @@ public class DataStore implements Serializable, Closeable {
                                 .iterator();
 
                         _from = tableEntries.get(tableEntries.size() - 1).name;
-                    } catch (IOException e) {
+                    } catch (Exception e) {
                         throw Throwables.propagate(e);
-                    } finally {
-                        if (response != null) {
-                            response.close();
-                        }
                     }
                 }
 

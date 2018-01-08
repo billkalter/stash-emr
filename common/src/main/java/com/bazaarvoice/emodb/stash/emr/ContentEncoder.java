@@ -7,12 +7,19 @@ import net.jpountz.lz4.LZ4Factory;
 
 import java.util.Arrays;
 
+/**
+ * Encoders for storing document JSON in Parquet.
+ * @see ContentEncoding
+ */
 public abstract class ContentEncoder {
 
     abstract public byte[] fromJson(String json);
 
     abstract public String toJson(byte[] bytes);
 
+    /**
+     * Encoder for simple UTF-8 text.
+     */
     static class TextContentEncoder extends ContentEncoder {
         @Override
         public byte[] fromJson(String json) {
@@ -31,6 +38,10 @@ public abstract class ContentEncoder {
         }
     }
 
+    /**
+     * Encoder for LZ4 compressed UTF-8 bytes.  Since decompression is fastest when the compressed size is known a-priori
+     * the first 4 bytes of the returned array is an integer containing the original content length.
+     */
     static class LZ4ContentEncoder extends ContentEncoder {
 
         private final LZ4Factory factory = LZ4Factory.fastestInstance();

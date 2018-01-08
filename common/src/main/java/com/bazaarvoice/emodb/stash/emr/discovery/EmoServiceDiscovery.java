@@ -24,6 +24,10 @@ import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
+/**
+ * Service discovery for EmoDB.  This uses the same logic as in the EmoDB Java client but without the incompatible
+ * dependencies introduced by the current client.
+ */
 public abstract class EmoServiceDiscovery extends AbstractService implements Serializable {
 
     private static final Logger _log = LoggerFactory.getLogger(EmoServiceDiscovery.class);
@@ -111,6 +115,10 @@ public abstract class EmoServiceDiscovery extends AbstractService implements Ser
         hostsChanged(hosts);
     }
 
+    /**
+     * The actual ZooKeeper registration contains more attributes than this, but we'll only keep the ones which matter
+     * for service location.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     private static class RegistrationData {
         public String id;

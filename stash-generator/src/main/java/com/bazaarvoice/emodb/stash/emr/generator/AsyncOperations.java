@@ -1,6 +1,5 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
-import com.google.common.base.Throwables;
 import com.google.common.collect.Sets;
 import com.google.common.util.concurrent.AbstractFuture;
 import org.apache.spark.api.java.JavaFutureAction;
@@ -12,7 +11,6 @@ import java.util.Set;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.ScheduledExecutorService;
-import java.util.concurrent.Semaphore;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
@@ -22,15 +20,13 @@ public class AsyncOperations {
 
     private final Set<WatchedFuture<?>> _watchedFutures = Collections.synchronizedSet(Sets.newIdentityHashSet());
     private final Set<WatchedFuture<?>> _failedFutures = Collections.synchronizedSet(Sets.newIdentityHashSet());
-    private final Semaphore _semaphore;
-    
+
     private final ScheduledExecutorService _monitorService;
     private final ExecutorService _opService;
 
-    public AsyncOperations(ScheduledExecutorService monitorService, ExecutorService opService, int maxAsyncOperations) {
+    public AsyncOperations(ScheduledExecutorService monitorService, ExecutorService opService) {
         _monitorService = monitorService;
         _opService = opService;
-        _semaphore = new Semaphore(maxAsyncOperations);
     }
 
     public void watch(JavaFutureAction<?> future) {
@@ -38,12 +34,6 @@ public class AsyncOperations {
     }
 
     public <T> void watchAndThen(final JavaFutureAction<T> future, final Op<T> then) {
-        // Avoid more than the maximum number of parallel operations simultaneously.  Block until available.
-        try {
-            _semaphore.acquire();
-        } catch (InterruptedException e) {
-            throw Throwables.propagate(e);
-        }
         WatchedFuture<T> watchedFuture = new WatchedFuture<T>(future, then);
         _watchedFutures.add(watchedFuture);
         watchedFuture.scheduleNextCheck();
@@ -84,7 +74,6 @@ public class AsyncOperations {
         @Override
         public void run() {
             if (_future.isDone()) {
-                _semaphore.release();
                 _opService.submit(() -> {
                     try {
                         if (_future.isCancelled()) {

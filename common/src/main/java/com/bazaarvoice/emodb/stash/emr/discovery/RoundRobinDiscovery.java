@@ -7,6 +7,12 @@ import java.util.Iterator;
 import java.util.List;
 import java.util.stream.Collectors;
 
+/**
+ * Simple ServiceDiscovery implementation which round-robins requests around all servers in the EmoDB cluster.  This is
+ * not as sophisticated as the Ostrich client; it doesn't track bad hosts or perform automatic retries.  However, the
+ * Spark services make limited calls directly to Emo and those which do have built-in retries, so favor simplicity
+ * over unnecessary robustness.
+ */
 public class RoundRobinDiscovery extends EmoServiceDiscovery {
 
     private volatile Iterator<URI> _uris = Iterators.emptyIterator();

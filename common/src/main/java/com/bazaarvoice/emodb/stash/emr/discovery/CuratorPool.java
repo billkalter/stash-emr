@@ -29,6 +29,13 @@ import org.apache.zookeeper.Watcher;
 import java.util.concurrent.ThreadFactory;
 import java.util.concurrent.TimeUnit;
 
+/**
+ * Globally there should only at most one single Curator instance for EmoDB service location which is shared by all
+ * tasks in the same JVM.  This class uses caching and reference counters to satisfy this outcome.  The implementation
+ * isn't perfect -- for example, there are no protections against using the cached curator after a call to
+ * {@link RefCountCurator#close()} if there the reference count is non-zero -- but it's good enough for our limited
+ * needs without getting unnecessarily complicated.
+ */
 public class CuratorPool {
 
     private final static LoadingCache<String, CuratorFramework> _curators = CacheBuilder.newBuilder()

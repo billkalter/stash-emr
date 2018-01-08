@@ -7,6 +7,9 @@ import com.google.common.collect.ComparisonChain;
 import java.io.Serializable;
 import java.util.Objects;
 
+/**
+ * Version information about an EmoDB document.
+ */
 public class DocumentVersion implements Serializable, Comparable<DocumentVersion> {
 
     private final long _version;

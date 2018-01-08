@@ -76,7 +76,6 @@ public class StashGenerator {
 
     private static final DateTimeFormatter STASH_DIR_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd-HH-mm-ss").withZone(ZoneOffset.UTC);
     public static final int DEFAULT_PARTITION_SIZE = 100000;
-    public static final int DEFAULT_MAX_ASYNC_OPERATIONS = 2048;
 
     public static void main(String args[]) throws Exception {
         ArgumentParser argParser = ArgumentParsers.newFor("StashGenerator").addHelp(true).build();
@@ -119,10 +118,6 @@ public class StashGenerator {
                 .type(Integer.class)
                 .setDefault(DEFAULT_PARTITION_SIZE)
                 .help(String.format("Partition size for Stash gzip files (default is %d)", DEFAULT_PARTITION_SIZE));
-        argParser.addArgument("--maxAsyncOperations")
-                .type(Integer.class)
-                .setDefault(DEFAULT_MAX_ASYNC_OPERATIONS)
-                .help(String.format("Maximum number of concurrent async spark operations (default is %d)", DEFAULT_MAX_ASYNC_OPERATIONS));
 
         Namespace ns = argParser.parseArgs(args);
 
@@ -139,8 +134,7 @@ public class StashGenerator {
         String existingTablesFile = ns.getString("existingTablesFile");
         boolean optimizeUnmodifiedTables = !ns.getBoolean("noOptimizeUnmodifiedTables");
         int partitionSize = ns.getInt("partitionSize");
-        int maxAsyncOperations = ns.getInt("maxAsyncOperations");
-        
+
         String zkConnectionString = ns.getString("zkConnectionString");
         String zkNamespace = ns.getString("zkNamespace");
         String emoUrlString = ns.getString("emoUrl");
@@ -160,14 +154,14 @@ public class StashGenerator {
 
         new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, outputStashRoot, stashDate, master,
                 Optional.fromNullable(region), Optional.fromNullable(existingTablesFile), optimizeUnmodifiedTables,
-                partitionSize, maxAsyncOperations);
+                partitionSize);
     }
 
     public void runStashGenerator(final DataStore dataStore, final String databusSource, final URI stashRoot,
                                   final URI outputStashRoot,
                                   final ZonedDateTime stashTime, final String master,
                                   Optional<String> region, Optional<String> existingTablesFile,
-                                  boolean optimizeUnmodifiedTables, int partitionSize, int maxAsyncOperations) throws Exception {
+                                  boolean optimizeUnmodifiedTables, int partitionSize) throws Exception {
 
         SparkSession sparkSession = SparkSession.builder()
                 .appName("StashGenerator")
@@ -231,7 +225,7 @@ public class StashGenerator {
         ExecutorService opService = Executors.newCachedThreadPool();
         BroadcastRegistry broadcastRegistry = new BroadcastRegistry();
         try {
-            AsyncOperations asyncOperations = new AsyncOperations(monitorService, opService, maxAsyncOperations);
+            AsyncOperations asyncOperations = new AsyncOperations(monitorService, opService);
 
             copyExistingStashTables(unmodifiedTables, priorStash, newStash, asyncOperations);
 

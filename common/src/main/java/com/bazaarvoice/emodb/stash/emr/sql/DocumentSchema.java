@@ -14,6 +14,9 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.UUID;
 
+/**
+ * Schema definition for Parquet documents.
+ */
 public class DocumentSchema {
     private static final DateTimeFormatter DATE_FORMAT = DateTimeFormatter.ofPattern("yyyyMMdd").withZone(ZoneOffset.UTC);
 
@@ -36,7 +39,7 @@ public class DocumentSchema {
                     .add(DataTypes.createStructField(LAST_UPDATE_TS, DataTypes.LongType, false))
                     .add(DataTypes.createStructField(DELETED, DataTypes.BooleanType, false))
                     .add(DataTypes.createStructField(ENCODING, DataTypes.IntegerType, false))
-                    .add(DataTypes.createStructField(CONTENT, DataTypes.BinaryType, false))
+                    .add(DataTypes.createStructField(CONTENT, DataTypes.BinaryType, true))
                     .add(DataTypes.createStructField(POLL_DATE, DataTypes.StringType, false))
                     .build());
 

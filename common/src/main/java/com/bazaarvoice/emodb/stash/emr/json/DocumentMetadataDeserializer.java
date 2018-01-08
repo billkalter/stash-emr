@@ -13,6 +13,9 @@ import com.fasterxml.jackson.databind.util.ISO8601DateFormat;
 import java.io.IOException;
 import java.text.ParsePosition;
 
+/**
+ * Efficient deserializer for {@link DocumentMetadata}.
+ */
 public class DocumentMetadataDeserializer extends JsonDeserializer<DocumentMetadata> {
 
     private final static ISO8601DateFormat _dateParser = new ISO8601DateFormat();

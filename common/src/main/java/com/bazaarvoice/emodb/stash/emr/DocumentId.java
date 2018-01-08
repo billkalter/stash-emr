@@ -7,6 +7,9 @@ import com.google.common.collect.ComparisonChain;
 
 import java.io.Serializable;
 
+/**
+ * Unique identifier for a document in EmoDB.
+ */
 public class DocumentId implements Serializable, Comparable<DocumentId> {
 
     private final String _table;

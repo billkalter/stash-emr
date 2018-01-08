@@ -59,10 +59,15 @@ public class DatabusAccumulator implements Serializable {
         argParser.addArgument("--emoUrl")
                 .help("EmoDB URL (if using direct EmoDB access)");
         argParser.addArgument("--master")
+                .required(true)
                 .help("Spark master URL");
         argParser.addArgument("--batchInterval")
                 .setDefault("PT5M")
                 .help("Streaming batch interval");
+        argParser.addArgument("--jsonEncoding")
+                .choices("TEXT", "LZ4")
+                .setDefault("LZ4")
+                .help("Persisted encoding for JSON");
 
         Namespace ns = argParser.parseArgs(args);
 
@@ -73,7 +78,8 @@ public class DatabusAccumulator implements Serializable {
         String destination = ns.getString("destination");
         String master = ns.getString("master");
         Duration batchInterval = Durations.milliseconds(java.time.Duration.parse(ns.getString("batchInterval")).toMillis());
-
+        ContentEncoding contentEncoding = ContentEncoding.valueOf(ns.getString("jsonEncoding"));
+        
         String zkConnectionString = ns.getString("zkConnectionString");
         String zkNamespace = ns.getString("zkNamespace");
         String emoUrlString = ns.getString("emoUrl");
@@ -92,11 +98,12 @@ public class DatabusAccumulator implements Serializable {
 
         DatabusReceiver databusReceiver = new DatabusReceiver(databusDiscoveryBuilder, subscriptionName, subscriptionCondition, apiKey);
         
-        new DatabusAccumulator().runAccumulator(databusReceiver, destination, master, batchInterval);
+        new DatabusAccumulator().runAccumulator(databusReceiver, destination, master, batchInterval, contentEncoding);
     }
 
     public void runAccumulator(final DatabusReceiver databusReceiver, final String destination,
-                               @Nullable final String master, Duration batchInterval) throws InterruptedException {
+                               @Nullable final String master, Duration batchInterval,
+                               final ContentEncoding contentEncoding) throws InterruptedException {
 
         SparkSession sparkSession = SparkSession.builder()
                 .appName("DatabusAccumulator")
@@ -119,7 +126,7 @@ public class DatabusAccumulator implements Serializable {
             SQLContext sqlContext = SQLContext.getOrCreate(rdd.context());
             Dataset<Row> dataFrame = sqlContext.createDataFrame(
                     rdd.values().map(event -> toRow(event.getUpdateId(), event.getDocumentMetadata(),
-                            ContentEncoding.LZ4, event.getJson(),
+                            contentEncoding, event.getJson(),
                             ZonedDateTime.ofInstant(Instant.ofEpochMilli(time.milliseconds()), ZoneOffset.UTC))),
                     DocumentSchema.SCHEMA);
 
@@ -131,7 +138,7 @@ public class DatabusAccumulator implements Serializable {
     }
 
     private static DatabusEvent newestDocumentVersion(DatabusEvent left, DatabusEvent right) {
-        if (left.getDocumentMetadata().getDocumentVersion().compareTo( right.getDocumentMetadata().getDocumentVersion()) < 0) {
+        if (left.getDocumentMetadata().getDocumentVersion().compareTo(right.getDocumentMetadata().getDocumentVersion()) < 0) {
             return right;
         }
         return left;
