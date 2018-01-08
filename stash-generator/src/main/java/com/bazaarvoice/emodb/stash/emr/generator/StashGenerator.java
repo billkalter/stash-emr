@@ -75,7 +75,7 @@ public class StashGenerator {
     private static final Logger _log = LoggerFactory.getLogger(StashGenerator.class);
 
     private static final DateTimeFormatter STASH_DIR_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd-HH-mm-ss").withZone(ZoneOffset.UTC);
-    public static final int DEFAULT_PARTITION_SIZE = 25000;
+    public static final int DEFAULT_PARTITION_SIZE = 100000;
     public static final int DEFAULT_MAX_ASYNC_OPERATIONS = 2048;
 
     public static void main(String args[]) throws Exception {
