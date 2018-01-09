@@ -23,6 +23,9 @@ import com.google.common.collect.Lists;
 import com.google.common.io.Closeables;
 import com.google.common.io.Files;
 import org.apache.commons.compress.compressors.gzip.GzipCompressorInputStream;
+import org.apache.hadoop.io.retry.RetryPolicies;
+import org.apache.hadoop.io.retry.RetryPolicy;
+import org.apache.hadoop.io.retry.RetryProxy;
 import org.apache.spark.api.java.Optional;
 import scala.Tuple2;
 
@@ -43,6 +46,7 @@ import java.net.URI;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
+import java.util.concurrent.TimeUnit;
 import java.util.stream.Collectors;
 
 import static com.amazonaws.services.s3.internal.Constants.MB;
@@ -290,7 +294,11 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
             objectMetadata.setContentType("application/text");
             objectMetadata.setContentLength(content.length);
 
-            s3().putObject(new PutObjectRequest(_bucket, key, new ByteArrayInputStream(content), objectMetadata));
+            // Add retries for writing the _LATEST file since this typically happens on the driver and therefore is not
+            // automatically retried by Spark on failure.
+            RetryPolicy retryPolicy = RetryPolicies.exponentialBackoffRetry(10, 250, TimeUnit.MILLISECONDS);
+            AmazonS3 s3 = (AmazonS3) RetryProxy.create(AmazonS3.class, s3(), retryPolicy);
+            s3.putObject(new PutObjectRequest(_bucket, key, new ByteArrayInputStream(content), objectMetadata));
         }
     }
 
