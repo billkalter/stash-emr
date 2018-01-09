@@ -8,6 +8,9 @@ import java.net.URI;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
+/**
+ * {@link PartitionedDiscovery} implementation for discovering EmoDB databus servers.
+ */
 public class DatabusDiscovery extends PartitionedDiscovery {
 
     DatabusDiscovery(String zookeeperConnectionString, String zookeeperNamespace, String service, String partitionKey, URI directUri) {

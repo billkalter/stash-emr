@@ -5,6 +5,9 @@ import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import java.io.Serializable;
 import java.util.UUID;
 
+/**
+ * A single polled event from the databus.  Each update is assigned a unique ID.
+ */
 public class DatabusEvent implements Serializable {
 
     private final UUID _updateId;

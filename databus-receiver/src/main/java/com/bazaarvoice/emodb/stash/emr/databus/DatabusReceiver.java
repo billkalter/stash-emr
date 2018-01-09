@@ -49,6 +49,9 @@ import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.toJsonString;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkNotNull;
 
+/**
+ * Spark receiver implementation for receiving databus events.
+ */
 public class DatabusReceiver extends Receiver<DatabusEvent> {
 
     private final static Logger _log = LoggerFactory.getLogger(DatabusReceiver.class);
