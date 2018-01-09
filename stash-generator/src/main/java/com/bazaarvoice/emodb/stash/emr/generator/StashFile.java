@@ -4,6 +4,9 @@ import com.google.common.base.Objects;
 
 import java.io.Serializable;
 
+/**
+ * POJO for Spark job to serve as an identifier for a file from the prior Stash.
+ */
 public class StashFile implements Serializable {
     private final int _tableIndex;
     private final int _fileIndex;

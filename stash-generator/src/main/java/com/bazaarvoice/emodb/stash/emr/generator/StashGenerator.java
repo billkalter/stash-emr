@@ -1,6 +1,5 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
-import com.bazaarvoice.emodb.stash.emr.ContentEncoding;
 import com.bazaarvoice.emodb.stash.emr.DocumentMetadata;
 import com.bazaarvoice.emodb.stash.emr.generator.io.CloseableIterator;
 import com.bazaarvoice.emodb.stash.emr.generator.io.StashFileWriter;
@@ -150,11 +149,11 @@ public class StashGenerator {
                 .withZookeeperDiscovery(zkConnectionString, zkNamespace)
                 .withDirectUri(emoUri);
 
-        DataStore dataStore = new DataStore(dataStoreDiscoveryBuilder, apiKey);
-
-        new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, outputStashRoot, stashDate, master,
-                Optional.fromNullable(region), Optional.fromNullable(existingTablesFile), optimizeUnmodifiedTables,
-                partitionSize);
+        try (DataStore dataStore = new DataStore(dataStoreDiscoveryBuilder, apiKey)) {
+            new StashGenerator().runStashGenerator(dataStore, databusSource, stashRoot, outputStashRoot, stashDate, master,
+                    Optional.fromNullable(region), Optional.fromNullable(existingTablesFile), optimizeUnmodifiedTables,
+                    partitionSize);
+        }
     }
 
     public void runStashGenerator(final DataStore dataStore, final String databusSource, final URI stashRoot,
@@ -477,8 +476,7 @@ public class StashGenerator {
             while (iter.hasNext()) {
                 TableAndValue<EncodedStashLine> tableAndValue = iter.next();
                 int tableIndex = tableAndValue.getTableIndex();
-                EncodedStashLine encodedStashLine = tableAndValue.getValue();
-                String jsonLine = ContentEncoding.fromCode(encodedStashLine.getEncoding()).getEncoder().toJson(encodedStashLine.getContent());
+                String jsonLine = tableAndValue.getValue().getJson();
 
                 if (tableIndex != lastTableIndex) {
                     if (tableWriter != null) {
@@ -561,6 +559,12 @@ public class StashGenerator {
             Closeables.close(stashFileJson, true);
         } catch (IOException e) {
             throw Throwables.propagate(e);
+        } finally {
+            try {
+                Closeables.close(tableWriter, true);
+            } catch (IOException e2) {
+                // Already managed
+            }
         }
     }
 

@@ -7,6 +7,9 @@ import java.net.URI;
 
 import static com.google.common.base.Preconditions.checkNotNull;
 
+/**
+ * {@link RoundRobinDiscovery} implementation for discovering EmoDB DataStore servers.
+ */
 public class DataStoreDiscovery extends RoundRobinDiscovery {
 
     DataStoreDiscovery(String zookeeperConnectionString, String zookeeperNamespace, String service, URI directUri) {

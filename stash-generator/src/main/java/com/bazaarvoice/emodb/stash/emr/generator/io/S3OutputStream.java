@@ -22,6 +22,11 @@ import java.io.OutputStream;
 import java.nio.ByteBuffer;
 import java.util.List;
 
+/**
+ * Abstraction for writing a Stash file to S3 as an {@link OutputStream}.  It will automatically upload as a single
+ * file or use multi-part uploads based on the length of data written.  Data is written to a provided buffer and
+ * uploaded when the stream is closed or the buffer is full, whichever happens first.
+ */
 public class S3OutputStream extends OutputStream {
 
     private final static Logger _log = LoggerFactory.getLogger(S3OutputStream.class);
@@ -29,17 +34,20 @@ public class S3OutputStream extends OutputStream {
     private final AmazonS3 _s3;
     private final String _bucket;
     private final String _key;
-    private final ByteBuffer _buffer;
+    private final BufferPool _bufferPool;
 
+    private ByteBuffer _buffer;
     private int _part = 1;
     private String _uploadId;
     private List<PartETag> _partETags;
+    private volatile boolean _closed = false;
 
-    public S3OutputStream(AmazonS3 s3, String bucket, String key, ByteBuffer buffer) {
+    public S3OutputStream(AmazonS3 s3, String bucket, String key, BufferPool bufferPool) {
         _s3 = s3;
         _bucket = bucket;
         _key = key;
-        _buffer = buffer;
+        _bufferPool = bufferPool;
+        _buffer = bufferPool.getBuffer();
     }
 
     @Override
@@ -103,24 +111,34 @@ public class S3OutputStream extends OutputStream {
 
     @Override
     public void close() throws IOException {
-        if (_part == 1) {
-            // Single part file
-            ObjectMetadata objectMetadata = new ObjectMetadata();
-            objectMetadata.setContentType("application/text");
-            objectMetadata.setContentEncoding("gzip");
-            objectMetadata.setContentLength(_buffer.position());
-
-            _s3.putObject(new PutObjectRequest(_bucket, _key, asInputStream(_buffer), objectMetadata));
-        } else {
-            // Multipart file
-            if (_buffer.position() != 0) {
-                uploadBuffer();
-            }
-
+        if (!_closed) {
             try {
-                _s3.completeMultipartUpload(new CompleteMultipartUploadRequest(_bucket, _key, _uploadId, _partETags));
-            } catch (AmazonClientException e) {
-                throw abortMulitpartUpload(e);
+                if (_part == 1) {
+                    // Single part file
+                    ObjectMetadata objectMetadata = new ObjectMetadata();
+                    objectMetadata.setContentType("application/text");
+                    objectMetadata.setContentEncoding("gzip");
+                    objectMetadata.setContentLength(_buffer.position());
+
+                    _s3.putObject(new PutObjectRequest(_bucket, _key, asInputStream(_buffer), objectMetadata));
+                } else {
+                    // Multipart file
+                    if (_buffer.position() != 0) {
+                        uploadBuffer();
+                    }
+
+                    try {
+                        _s3.completeMultipartUpload(new CompleteMultipartUploadRequest(_bucket, _key, _uploadId, _partETags));
+                    } catch (AmazonClientException e) {
+                        throw abortMulitpartUpload(e);
+                    }
+                }
+            } finally {
+                if (_buffer != null) {
+                    _bufferPool.returnBuffer(_buffer);
+                    _buffer = null;
+                }
+                _closed = true;
             }
         }
     }

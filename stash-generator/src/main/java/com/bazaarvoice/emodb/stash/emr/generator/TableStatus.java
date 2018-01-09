@@ -1,5 +1,9 @@
 package com.bazaarvoice.emodb.stash.emr.generator;
 
+/**
+ * The Spark job operates on tables based on a set of attributes for those tables.  This class provides a memory-efficient
+ * set of attributes associated with a table.
+ */
 public class TableStatus {
 
     public static final short NA = 0;

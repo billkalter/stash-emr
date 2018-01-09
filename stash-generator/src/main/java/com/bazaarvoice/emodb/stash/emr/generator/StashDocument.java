@@ -4,6 +4,9 @@ import com.google.common.base.Objects;
 
 import java.io.Serializable;
 
+/**
+ * POJO for Spark job to serve as an identifier for a unique EmoDB document in Stash.
+ */
 public class StashDocument implements Serializable {
     private final int _tableIndex;
     private final String _key;

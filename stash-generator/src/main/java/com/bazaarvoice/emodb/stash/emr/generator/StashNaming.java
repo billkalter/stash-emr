@@ -5,7 +5,10 @@ import com.google.common.collect.ImmutableBiMap;
 
 import java.util.Map;
 
-public class StashUtil {
+/**
+ * Simple utility for maintaining Stash naming conventions.
+ */
+public class StashNaming {
 
     private static final BiMap<Character, Character> TABLE_CHAR_REPLACEMENTS =
             ImmutableBiMap.of(':', '~');

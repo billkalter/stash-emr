@@ -5,6 +5,12 @@ import com.google.common.collect.ComparisonChain;
 
 import java.io.Serializable;
 
+/**
+ * POJO for Spark job to serve as an index to a unique JSON document from a prior Stash.  If the Spark job were to store
+ * the JSON documents from a prior Stash in RDDs then memory pressure would quickly become a problem.  So instead of storing
+ * the JSON itself in the RDD the location of the document is stored in the RDD.  If it is determined that the document
+ * is unmodified the location can be used to re-read the document from the prior Stash and copy to the new Stash.
+ */
 public class StashLocation implements Serializable, Comparable<StashLocation> {
     private final int _fileIndex;
     private final int _line;
@@ -41,6 +47,10 @@ public class StashLocation implements Serializable, Comparable<StashLocation> {
         return Objects.hashCode(_fileIndex, _line);
     }
 
+    /**
+     * Sort by file then line number.  This optimizes the ability to efficiently read documents back from the previous
+     * Stash when sorted by location.
+     */
     @Override
     public int compareTo(StashLocation o) {
         return ComparisonChain.start()

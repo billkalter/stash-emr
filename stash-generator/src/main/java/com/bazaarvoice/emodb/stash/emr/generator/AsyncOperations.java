@@ -14,6 +14,15 @@ import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.stream.Stream;
 
+/**
+ * This is a useful helper class for watching {@link JavaFutureAction} instances returned by Spark async operations
+ * and optionally performing a follow-up operation based on the results.  This is very similar to Guava's
+ * {@link com.google.common.util.concurrent.ListenableFuture} except that the future's returned by Spark don't translate
+ * to the listenable API.
+ *
+ * This implementation uses two executor services: one for monitoring futures and a second for executing the post-completion
+ * operations.  This is done to prevent any long-running operation from blocking the monitors.
+ */
 public class AsyncOperations {
 
     private final static int MAX_BACKOFF = (int) TimeUnit.SECONDS.toMillis(10);

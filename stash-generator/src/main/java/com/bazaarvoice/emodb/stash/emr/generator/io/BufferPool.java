@@ -7,6 +7,10 @@ import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 import java.util.concurrent.BlockingQueue;
 
+/**
+ * Simple pool for ByteBuffers which caches a maximum number of ByteBuffers and blocks on calls to
+ * {@link #getBuffer()} until one is available.
+ */
 public class BufferPool {
 
     private final BlockingQueue<WeakReference<ByteBuffer>> _queue;
@@ -37,6 +41,7 @@ public class BufferPool {
     }
 
     public void returnBuffer(ByteBuffer byteBuffer) {
+        // Reset the buffer position before returning to the queue.
         byteBuffer.position(0);
         _queue.offer(new WeakReference<>(byteBuffer));
     }

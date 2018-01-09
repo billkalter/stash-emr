@@ -40,6 +40,9 @@ import java.util.concurrent.TimeoutException;
 
 import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
 
+/**
+ * Thin client for accessing EmoDB DataStore.  Only those methods actually used by the Stash generator are implemented.
+ */
 public class DataStore implements Serializable, Closeable {
 
     private final static Logger _log = LoggerFactory.getLogger(DataStore.class);
@@ -55,6 +58,10 @@ public class DataStore implements Serializable, Closeable {
         _apiKey = apiKey;
     }
 
+    /**
+     * Interface {@link IDataStoreClient} and it's implementation {@link DataStoreClient} are present only to satisfy
+     * using Spark's {@link RetryProxy} for retrying low-level client API calls.
+     */
     private interface IDataStoreClient {
         List<TableEntry> getTableEntries(@Nullable String from) throws Exception;
     }
@@ -174,6 +181,10 @@ public class DataStore implements Serializable, Closeable {
         super.finalize();
     }
 
+    /**
+     * Simple POJO class for parsing the JSON for an EmoDB table definition.  Only those attributes we actually care
+     * about are present.
+     */
     @JsonIgnoreProperties(ignoreUnknown = true)
     final static class TableEntry {
         @JsonProperty
@@ -198,6 +209,13 @@ public class DataStore implements Serializable, Closeable {
         }
     }
 
+    /**
+     * The list of tables returned by {@link #getTableNames()} should ignore tables which aren't available locally, such
+     * as when generating a Stash in us-east-1 for a table which is only replicated to eu-west-1.   Tables which are not
+     * locally available have an availability attribute of <code>null</code>.  Available tables have a struct with details
+     * about local storage which frankly we don't are about.  So availability and it's serializer are determined by whether
+     * the availability attribute exists and the value is a non-null struct.
+     */
     @JsonDeserialize(using = AvailabilityDeserializer.class)
     final static class Availability {
         final static Availability AVAILABLE = new Availability(true);

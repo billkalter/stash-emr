@@ -40,16 +40,18 @@ import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.io.Serializable;
 import java.net.URI;
-import java.nio.ByteBuffer;
 import java.util.Arrays;
 import java.util.Iterator;
 import java.util.List;
 import java.util.stream.Collectors;
 
 import static com.amazonaws.services.s3.internal.Constants.MB;
-import static com.bazaarvoice.emodb.stash.emr.generator.StashUtil.encodeStashTable;
+import static com.bazaarvoice.emodb.stash.emr.generator.StashNaming.encodeStashTable;
 import static com.bazaarvoice.emodb.stash.emr.json.JsonUtil.parseJson;
 
+/**
+ * Implementation for read/write access to Stash.
+ */
 abstract public class StashIO implements Serializable, StashReader, StashWriter {
 
     public static StashReader getLatestStash(URI stashRoot, Optional<String> region) {
@@ -101,7 +103,6 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
                     while (true) {
                         String line = bufferedReader.readLine();
                         if (line == null) {
-                            closeReader();
                             return endOfData();
                         }
                         if (!line.isEmpty()) {
@@ -109,21 +110,7 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
                         }
                     }
                 } catch (IOException e) {
-                    closeReader();
                     throw Throwables.propagate(e);
-                }
-            }
-
-            @Override
-            protected void finalize() throws Throwable {
-                closeReader();
-            }
-
-            private void closeReader() {
-                try {
-                    Closeables.close(bufferedReader, true);
-                } catch (IOException ignore) {
-                    // Already logged
                 }
             }
         };
@@ -157,6 +144,9 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
                 inputStream);
     }
 
+    /**
+     * S3 implementation.
+     */
     private static class S3StashIO extends StashIO {
 
         private static final BufferPool BUFFER_POOL = new BufferPool(16, 10 * MB);
@@ -272,27 +262,16 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
             String encodedTable = encodeStashTable(table);
             String s3File = String.format("%s/%s/%s-%s.gz", _stashPath, encodedTable, encodedTable, suffix);
 
-            final ByteBuffer buffer = BUFFER_POOL.getBuffer();
             OutputStream s3out = null;
             try {
-                s3out = new S3OutputStream(s3(), _bucket, s3File, buffer);
-                return new StashFileWriter(s3out) {
-                    @Override
-                    public void close() throws IOException {
-                        try {
-                            super.close();
-                        } finally {
-                            BUFFER_POOL.returnBuffer(buffer);
-                        }
-                    }
-                };
+                s3out = new S3OutputStream(s3(), _bucket, s3File, BUFFER_POOL);
+                return new StashFileWriter(s3out);
             } catch (IOException e) {
                 try {
                     Closeables.close(s3out, true);
                 } catch (IOException ignore) {
                     // Already managed
                 }
-                BUFFER_POOL.returnBuffer(buffer);
                 throw Throwables.propagate(e);
             }
         }
@@ -315,6 +294,9 @@ abstract public class StashIO implements Serializable, StashReader, StashWriter 
         }
     }
 
+    /**
+     * Local file system implementation.  Useful for unit testing.
+     */
     private static class LocalFileStashIO extends StashIO {
 
         private final File _stashDir;

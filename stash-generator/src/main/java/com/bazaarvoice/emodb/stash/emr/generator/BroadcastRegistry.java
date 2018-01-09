@@ -6,6 +6,9 @@ import org.apache.spark.broadcast.Broadcast;
 
 import java.util.List;
 
+/**
+ * Simple registry to ensure that all Spark Broadcast variables created by the job are destroyed on completion.
+ */
 public class BroadcastRegistry {
 
     private final List<Broadcast<?>> _broadcasts = Lists.newArrayList();

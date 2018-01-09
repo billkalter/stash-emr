@@ -5,6 +5,9 @@ import scala.Tuple2;
 
 import java.util.List;
 
+/**
+ * Interface for defining read access to a prior Stash.
+ */
 public interface StashReader {
     List<String> getTableFilesFromStash(String table);
 

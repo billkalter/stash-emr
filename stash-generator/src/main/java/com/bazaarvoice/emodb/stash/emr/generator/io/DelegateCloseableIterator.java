@@ -7,6 +7,10 @@ import java.io.Closeable;
 import java.io.IOException;
 import java.util.Iterator;
 
+/**
+ * Simple implementation of {@link CloseableIterator} which delegates to a provided iterator and closeable instance.
+ * The iterator is closed automatically once it is fully iterated.  Otherwise the caller must explicitly close it.
+ */
 public class DelegateCloseableIterator<T> extends AbstractIterator<T> implements CloseableIterator<T> {
 
     private final Iterator<T> _delegate;
@@ -37,5 +41,11 @@ public class DelegateCloseableIterator<T> extends AbstractIterator<T> implements
             _closeable.close();
             _closed = true;
         }
+    }
+
+    @Override
+    protected void finalize() throws Throwable {
+        super.finalize();
+        close();
     }
 }
